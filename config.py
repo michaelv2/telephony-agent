@@ -12,6 +12,9 @@ TWILIO_API_KEY = os.environ["TWILIO_API_KEY"]
 TWILIO_API_SECRET = os.environ["TWILIO_API_SECRET"]
 TWILIO_PHONE = os.environ["TWILIO_PHONE"]
 
+# Comma-separated list of phone numbers allowed to trigger calls via SMS
+ALLOWED_NUMBERS = [n.strip() for n in os.environ.get("ALLOWED_NUMBERS", "").split(",") if n.strip()]
+
 TTS_URL = os.environ.get("TTS_URL", "http://localhost:9100")
 TTS_VOICE = os.environ.get("TTS_VOICE", "af_heart")
 

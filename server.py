@@ -34,26 +34,37 @@ _call_contexts: dict[str, str] = {}
 # Transfer-to number stored by call SID
 _transfer_numbers: dict[str, str] = {}
 
-# Words/patterns that suggest the speaker hasn't finished their thought
-_INCOMPLETE_SUFFIXES = (
-    " and", " but", " or", " so", " because", " since", " although",
-    " though", " while", " if", " when", " that", " which", " who",
-    " like", " um", " uh", " well", " I mean", " you know",
-    " actually", " basically", " the", " a", " an", " my", " your",
-    " their", " to", " for", " with", " about", " of",
-)
-
-
-def _looks_incomplete(text: str) -> bool:
-    """Check if a transcript looks like an unfinished thought."""
-    # Strip trailing punctuation that Whisper adds (periods, ellipses, etc.)
-    lower = text.lower().rstrip().rstrip(".!?…").rstrip()
-    return any(lower.endswith(suffix) for suffix in _INCOMPLETE_SUFFIXES)
-
-
 # Debounce window: wait this long after a transcript before responding,
 # in case more speech is coming.
 _DEBOUNCE_SECONDS = 0.3
+
+# If held text hasn't been released after this many seconds, flush it anyway.
+_HOLD_TIMEOUT_SECONDS = 4.0
+
+
+async def _is_complete_turn(text: str) -> bool:
+    """Use Haiku to determine if a transcript is a complete conversational turn."""
+    import anthropic as _anthropic
+
+    client = _anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+    try:
+        resp = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=10,
+            system=(
+                "You are a turn-detection classifier for a voice conversation. "
+                "Given a transcript segment, determine if the speaker has finished "
+                "their turn (complete thought) or is mid-sentence/pausing briefly. "
+                "Respond with exactly one word: COMPLETE or INCOMPLETE."
+            ),
+            messages=[{"role": "user", "content": text}],
+        )
+        result = resp.content[0].text.strip().upper()
+        return result == "COMPLETE"
+    except Exception:
+        # On error, assume complete to avoid holding indefinitely
+        logger.warning("Turn detection failed, assuming complete")
+        return True
 
 # Transcript archive directory
 _TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
@@ -119,6 +130,101 @@ async def call_outbound(request: Request):
     return Response(content=twiml, media_type="application/xml")
 
 
+# --- SMS Webhook ---
+
+
+@app.post("/sms/inbound")
+async def sms_inbound(request: Request):
+    """Twilio webhook for incoming SMS. Parses the message and initiates an outbound call."""
+    form = await request.form()
+    from_number = form.get("From", "")
+    body = form.get("Body", "").strip()
+
+    logger.info(f"SMS from {from_number}: {body}")
+
+    # Only allow authorized numbers
+    if config.ALLOWED_NUMBERS and from_number not in config.ALLOWED_NUMBERS:
+        logger.warning(f"Unauthorized SMS from {from_number}")
+        twiml = '<?xml version="1.0" encoding="UTF-8"?><Response><Message>Not authorized.</Message></Response>'
+        return Response(content=twiml, media_type="application/xml")
+
+    if not body:
+        twiml = '<?xml version="1.0" encoding="UTF-8"?><Response><Message>Send a message like: Call 555-123-4567 schedule a dental cleaning</Message></Response>'
+        return Response(content=twiml, media_type="application/xml")
+
+    # Use Claude to parse the SMS into a phone number and call context
+    parsed = await _parse_sms(body)
+
+    if not parsed:
+        twiml = '<?xml version="1.0" encoding="UTF-8"?><Response><Message>I couldn\'t find a phone number in your message. Try: Call 555-123-4567 schedule a dental cleaning</Message></Response>'
+        return Response(content=twiml, media_type="application/xml")
+
+    to_number, context = parsed
+
+    # Initiate the call
+    try:
+        twilio = TwilioClient(config.TWILIO_API_KEY, config.TWILIO_API_SECRET, config.TWILIO_ACCOUNT_SID)
+        twiml_url = config.get_public_url() + "/call/outbound"
+
+        call = twilio.calls.create(
+            to=to_number,
+            from_=config.TWILIO_PHONE,
+            url=twiml_url,
+        )
+
+        if context:
+            _call_contexts[call.sid] = context
+        _transfer_numbers[call.sid] = from_number
+
+        logger.info(f"SMS-triggered call: {call.sid} -> {to_number}")
+
+        reply = f"Got it! Calling {to_number} now. I'll text you when it's done."
+        twiml = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{reply}</Message></Response>'
+        return Response(content=twiml, media_type="application/xml")
+
+    except Exception:
+        logger.exception("Failed to initiate SMS-triggered call")
+        twiml = '<?xml version="1.0" encoding="UTF-8"?><Response><Message>Something went wrong initiating the call. Please try again.</Message></Response>'
+        return Response(content=twiml, media_type="application/xml")
+
+
+async def _parse_sms(body: str) -> tuple[str, str] | None:
+    """Use Claude to extract a phone number and call context from an SMS."""
+    import anthropic as _anthropic
+
+    client = _anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    resp = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        system=(
+            "Extract a phone number and call purpose from the user's message. "
+            "Respond in exactly this format:\n"
+            "PHONE: <number in E.164 format, e.g. +15551234567>\n"
+            "CONTEXT: <what the agent should do on the call>\n\n"
+            "If there is no phone number, respond with just: NO_PHONE"
+        ),
+        messages=[{"role": "user", "content": body}],
+    )
+
+    text = resp.content[0].text.strip()
+
+    if "NO_PHONE" in text:
+        return None
+
+    phone = None
+    context = ""
+    for line in text.split("\n"):
+        if line.startswith("PHONE:"):
+            phone = line.split(":", 1)[1].strip()
+        elif line.startswith("CONTEXT:"):
+            context = line.split(":", 1)[1].strip()
+
+    if not phone:
+        return None
+
+    return phone, context
+
+
 # --- Outbound Call API ---
 
 
@@ -163,23 +269,55 @@ async def media_stream(ws: WebSocket):
     connected = asyncio.Event()
     connected.set()
     speaking = asyncio.Event()  # Set while agent TTS is being sent
+    greeting_done = asyncio.Event()  # Set once greeting finishes playing
     response_task: asyncio.Task | None = None
     debounce_task: asyncio.Task | None = None
+    hold_timeout_task: asyncio.Task | None = None
     pending_text = ""  # Accumulates incomplete utterances
     transcript_log: TranscriptLog | None = None
 
     transfer_number: str | None = None
 
     async def _debounced_respond(text: str) -> None:
-        """Wait briefly for more speech, then fire the response."""
+        """Wait for debounce, check turn completeness, then fire the response."""
         await asyncio.sleep(_DEBOUNCE_SECONDS)
-        nonlocal response_task
-        response_task = asyncio.create_task(
-            _stream_agent_response(
-                ws, agent, stream_sid, call_sid, connected, speaking, transcript_log,
-                transfer_number, user_text=text
+        nonlocal pending_text, response_task, hold_timeout_task
+
+        # Ask Haiku if this is a complete turn
+        is_complete = await _is_complete_turn(text)
+
+        if not is_complete:
+            pending_text = text
+            logger.info(f"LLM: holding incomplete turn: {text[-80:]}")
+            # Start a hold timeout — flush after N seconds if nothing new arrives
+            if hold_timeout_task and not hold_timeout_task.done():
+                hold_timeout_task.cancel()
+            hold_timeout_task = asyncio.create_task(_flush_after_timeout())
+        else:
+            pending_text = ""
+            if hold_timeout_task and not hold_timeout_task.done():
+                hold_timeout_task.cancel()
+            response_task = asyncio.create_task(
+                _stream_agent_response(
+                    ws, agent, stream_sid, call_sid, connected, speaking, transcript_log,
+                    transfer_number, user_text=text
+                )
             )
-        )
+
+    async def _flush_after_timeout() -> None:
+        """Flush held text after a timeout in case the speaker is done."""
+        await asyncio.sleep(_HOLD_TIMEOUT_SECONDS)
+        nonlocal pending_text, response_task
+        if pending_text:
+            text = pending_text
+            pending_text = ""
+            logger.info(f"Hold timeout — flushing: {text[-80:]}")
+            response_task = asyncio.create_task(
+                _stream_agent_response(
+                    ws, agent, stream_sid, call_sid, connected, speaking, transcript_log,
+                    transfer_number, user_text=text
+                )
+            )
 
     try:
         greeting_sent = False
@@ -203,7 +341,8 @@ async def media_stream(ws: WebSocket):
                     response_task = asyncio.create_task(
                         _stream_agent_response(
                             ws, agent, stream_sid, call_sid, connected, speaking,
-                            transcript_log, transfer_number, greeting=True
+                            transcript_log, transfer_number, greeting=True,
+                            on_done=greeting_done,
                         )
                     )
 
@@ -214,8 +353,14 @@ async def media_stream(ws: WebSocket):
                 await stt_engine.feed_audio(pcm)
 
                 # VAD-level barge-in: cancel as soon as speech is detected,
-                # don't wait for a full transcript
-                if stt_engine.speech_active and speaking.is_set() and response_task and not response_task.done():
+                # but NOT during the greeting (let it play first)
+                if (
+                    stt_engine.speech_active
+                    and speaking.is_set()
+                    and greeting_done.is_set()
+                    and response_task
+                    and not response_task.done()
+                ):
                     response_task.cancel()
                     speaking.clear()
                     logger.info("Barge-in detected (VAD)")
@@ -226,21 +371,22 @@ async def media_stream(ws: WebSocket):
                     # Cancel any pending debounce — new speech arrived
                     if debounce_task and not debounce_task.done():
                         debounce_task.cancel()
+                    # Cancel hold timeout — new speech resets it
+                    if hold_timeout_task and not hold_timeout_task.done():
+                        hold_timeout_task.cancel()
 
-                    # Accumulate if the utterance looks incomplete
+                    # Accumulate with any held text
                     combined = (pending_text + " " + transcript).strip() if pending_text else transcript
+                    pending_text = ""
 
-                    if _looks_incomplete(combined):
-                        pending_text = combined
-                        logger.info(f"Holding incomplete utterance: {combined}")
-                    else:
-                        pending_text = ""
-                        debounce_task = asyncio.create_task(_debounced_respond(combined))
+                    debounce_task = asyncio.create_task(_debounced_respond(combined))
 
             elif event == "stop":
-                # Cancel debounce and flush any pending text
+                # Cancel debounce/timeout and flush any pending text
                 if debounce_task and not debounce_task.done():
                     debounce_task.cancel()
+                if hold_timeout_task and not hold_timeout_task.done():
+                    hold_timeout_task.cancel()
                 if pending_text and agent:
                     response_task = asyncio.create_task(
                         _stream_agent_response(
@@ -275,6 +421,7 @@ async def _stream_agent_response(
     transfer_number: str | None = None,
     user_text: str | None = None,
     greeting: bool = False,
+    on_done: asyncio.Event | None = None,
 ) -> None:
     """Stream Claude's response sentence-by-sentence through TTS to Twilio."""
     should_transfer = False
@@ -348,6 +495,8 @@ async def _stream_agent_response(
         logger.exception("Error in agent response pipeline")
     finally:
         speaking.clear()
+        if on_done:
+            on_done.set()
 
 
 async def _execute_transfer(call_sid: str, transfer_to: str) -> None:
