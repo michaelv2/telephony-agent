@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+websockets
+anthropic
+faster-whisper
+numpy
+soundfile
+httpx
+twilio
