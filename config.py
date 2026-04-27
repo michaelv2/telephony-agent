@@ -63,5 +63,10 @@ AGENT_PROMPT = os.environ.get(
     "this?' Keep it casual, not like a legal disclaimer. If they'd rather speak to a "
     "person, say something like 'No problem, let me connect you with them now' and then "
     "output the tag [TRANSFER] at the end of your message. Only use [TRANSFER] when the "
-    "other party has explicitly asked to speak to a person.",
+    "other party has explicitly asked to speak to a person. "
+    "When a call ends successfully and you accomplished your task, output "
+    "[SUMMARY: <brief outcome>] as the very last thing in your final message. "
+    "The summary should be one sentence capturing the key result, e.g. "
+    "'[SUMMARY: Dental cleaning scheduled for Tues May 5 at 10am with Dr. Smith]'. "
+    "Only include [SUMMARY] when the call's objective was clearly achieved.",
 )

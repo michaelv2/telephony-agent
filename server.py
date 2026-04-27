@@ -261,6 +261,7 @@ async def media_stream(ws: WebSocket):
 
 
 _TRANSFER_TAG = "[TRANSFER]"
+_SUMMARY_RE = __import__("re").compile(r"\[SUMMARY:\s*(.+?)\]")
 
 
 async def _stream_agent_response(
@@ -300,6 +301,11 @@ async def _stream_agent_response(
                 sentence = sentence.replace(_TRANSFER_TAG, "").strip()
                 should_transfer = True
 
+            # Strip summary tag from spoken text (will be sent as SMS)
+            summary_match = _SUMMARY_RE.search(sentence)
+            if summary_match:
+                sentence = _SUMMARY_RE.sub("", sentence).strip()
+
             full_response += (" " if full_response else "") + sentence
 
             # Send each sentence to TTS immediately — don't wait for full response
@@ -331,6 +337,11 @@ async def _stream_agent_response(
         if should_transfer and transfer_number and call_sid:
             await _execute_transfer(call_sid, transfer_number)
 
+        # Send SMS summary to user if the call achieved its objective
+        summary_match = _SUMMARY_RE.search(full_response)
+        if summary_match and transfer_number:
+            await _send_sms(transfer_number, summary_match.group(1))
+
     except asyncio.CancelledError:
         logger.info("Response cancelled (barge-in)")
     except Exception:
@@ -351,6 +362,20 @@ async def _execute_transfer(call_sid: str, transfer_to: str) -> None:
         logger.info(f"Call {call_sid} transferred to {transfer_to}")
     except Exception:
         logger.exception(f"Failed to transfer call {call_sid}")
+
+
+async def _send_sms(to: str, message: str) -> None:
+    """Send an SMS summary to the user via Twilio."""
+    try:
+        twilio = TwilioClient(config.TWILIO_API_KEY, config.TWILIO_API_SECRET, config.TWILIO_ACCOUNT_SID)
+        twilio.messages.create(
+            to=to,
+            from_=config.TWILIO_PHONE,
+            body=f"Call complete: {message}",
+        )
+        logger.info(f"SMS sent to {to}: {message}")
+    except Exception:
+        logger.exception(f"Failed to send SMS to {to}")
 
 
 if __name__ == "__main__":
