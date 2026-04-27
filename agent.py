@@ -24,6 +24,7 @@ class CallAgent:
     def __init__(self, context: str | None = None):
         self.messages: list[dict] = []
         self.system = SYSTEM_PROMPT
+        self._has_context = bool(context)
         if context:
             self.system += f"\n\nAdditional context for this call: {context}"
 
@@ -64,7 +65,13 @@ class CallAgent:
 
     async def greeting_stream(self) -> AsyncGenerator[str, None]:
         """Stream an initial greeting."""
-        async for sentence in self.respond_stream(
-            "[The call just connected. Greet the caller briefly.]"
-        ):
+        if self._has_context:
+            prompt = (
+                "[The call just connected. Introduce yourself, disclose that you're an AI "
+                "assistant calling on behalf of your user, briefly state why you're calling, "
+                "and check if they're okay to proceed with you.]"
+            )
+        else:
+            prompt = "[The call just connected. Greet the caller briefly.]"
+        async for sentence in self.respond_stream(prompt):
             yield sentence

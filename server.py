@@ -31,6 +31,8 @@ stt_engine: WhisperSTT | None = None
 
 # Call context stored by call SID — set via /api/call, consumed when WebSocket connects
 _call_contexts: dict[str, str] = {}
+# Transfer-to number stored by call SID
+_transfer_numbers: dict[str, str] = {}
 
 # Words/patterns that suggest the speaker hasn't finished their thought
 _INCOMPLETE_SUFFIXES = (
@@ -126,6 +128,7 @@ async def initiate_call(request: Request):
     body = await request.json()
     to_number = body["to"]
     context = body.get("context")
+    transfer_to = body.get("transfer_to")
 
     twilio = TwilioClient(config.TWILIO_API_KEY, config.TWILIO_API_SECRET, config.TWILIO_ACCOUNT_SID)
     twiml_url = config.get_public_url() + "/call/outbound"
@@ -138,6 +141,8 @@ async def initiate_call(request: Request):
 
     if context:
         _call_contexts[call.sid] = context
+    if transfer_to:
+        _transfer_numbers[call.sid] = transfer_to
 
     logger.info(f"Outbound call initiated: {call.sid} -> {to_number}")
     return {"call_sid": call.sid, "status": call.status}
@@ -163,13 +168,16 @@ async def media_stream(ws: WebSocket):
     pending_text = ""  # Accumulates incomplete utterances
     transcript_log: TranscriptLog | None = None
 
+    transfer_number: str | None = None
+
     async def _debounced_respond(text: str) -> None:
         """Wait briefly for more speech, then fire the response."""
         await asyncio.sleep(_DEBOUNCE_SECONDS)
         nonlocal response_task
         response_task = asyncio.create_task(
             _stream_agent_response(
-                ws, agent, stream_sid, connected, speaking, transcript_log, user_text=text
+                ws, agent, stream_sid, call_sid, connected, speaking, transcript_log,
+                transfer_number, user_text=text
             )
         )
 
@@ -185,6 +193,7 @@ async def media_stream(ws: WebSocket):
                 stream_sid = msg["start"]["streamSid"]
                 call_sid = msg["start"].get("callSid")
                 context = _call_contexts.pop(call_sid, None) if call_sid else None
+                transfer_number = _transfer_numbers.pop(call_sid, None) if call_sid else None
                 agent = CallAgent(context=context)
                 transcript_log = TranscriptLog(call_sid)
                 logger.info(f"Stream started: {stream_sid} (call={call_sid}, context={'yes' if context else 'none'})")
@@ -192,7 +201,10 @@ async def media_stream(ws: WebSocket):
                 if not greeting_sent:
                     greeting_sent = True
                     response_task = asyncio.create_task(
-                        _stream_agent_response(ws, agent, stream_sid, connected, speaking, transcript_log, greeting=True)
+                        _stream_agent_response(
+                            ws, agent, stream_sid, call_sid, connected, speaking,
+                            transcript_log, transfer_number, greeting=True
+                        )
                     )
 
             elif event == "media":
@@ -232,7 +244,8 @@ async def media_stream(ws: WebSocket):
                 if pending_text and agent:
                     response_task = asyncio.create_task(
                         _stream_agent_response(
-                            ws, agent, stream_sid, connected, speaking, transcript_log, user_text=pending_text
+                            ws, agent, stream_sid, call_sid, connected, speaking,
+                            transcript_log, transfer_number, user_text=pending_text
                         )
                     )
                     pending_text = ""
@@ -247,17 +260,24 @@ async def media_stream(ws: WebSocket):
             transcript_log.save()
 
 
+_TRANSFER_TAG = "[TRANSFER]"
+
+
 async def _stream_agent_response(
     ws: WebSocket,
     agent: CallAgent,
     stream_sid: str,
+    call_sid: str | None,
     connected: asyncio.Event,
     speaking: asyncio.Event,
     transcript_log: TranscriptLog | None = None,
+    transfer_number: str | None = None,
     user_text: str | None = None,
     greeting: bool = False,
 ) -> None:
     """Stream Claude's response sentence-by-sentence through TTS to Twilio."""
+    should_transfer = False
+
     try:
         if greeting:
             sentence_stream = agent.greeting_stream()
@@ -275,28 +295,41 @@ async def _stream_agent_response(
                 logger.info("Connection closed, aborting response")
                 return
 
+            # Check for transfer signal
+            if _TRANSFER_TAG in sentence:
+                sentence = sentence.replace(_TRANSFER_TAG, "").strip()
+                should_transfer = True
+
             full_response += (" " if full_response else "") + sentence
 
             # Send each sentence to TTS immediately — don't wait for full response
-            chunks = await tts.synthesize(sentence)
+            if sentence:
+                chunks = await tts.synthesize(sentence)
 
-            for chunk in chunks:
-                if not connected.is_set():
-                    logger.info("Connection closed, aborting response")
-                    return
-                media_msg = {
-                    "event": "media",
-                    "streamSid": stream_sid,
-                    "media": {"payload": chunk},
-                }
-                await ws.send_text(json.dumps(media_msg))
+                for chunk in chunks:
+                    if not connected.is_set():
+                        logger.info("Connection closed, aborting response")
+                        return
+                    media_msg = {
+                        "event": "media",
+                        "streamSid": stream_sid,
+                        "media": {"payload": chunk},
+                    }
+                    await ws.send_text(json.dumps(media_msg))
 
-            total_chunks += len(chunks)
+                total_chunks += len(chunks)
+
+            if should_transfer:
+                break
 
         if transcript_log and full_response:
             transcript_log.agent(full_response)
 
         logger.info(f"Sent {total_chunks} audio chunks (streamed)")
+
+        # Execute transfer after speaking the farewell
+        if should_transfer and transfer_number and call_sid:
+            await _execute_transfer(call_sid, transfer_number)
 
     except asyncio.CancelledError:
         logger.info("Response cancelled (barge-in)")
@@ -304,6 +337,20 @@ async def _stream_agent_response(
         logger.exception("Error in agent response pipeline")
     finally:
         speaking.clear()
+
+
+async def _execute_transfer(call_sid: str, transfer_to: str) -> None:
+    """Transfer an active call to another number via Twilio API."""
+    try:
+        twilio = TwilioClient(config.TWILIO_API_KEY, config.TWILIO_API_SECRET, config.TWILIO_ACCOUNT_SID)
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Dial>{transfer_to}</Dial>
+</Response>"""
+        twilio.calls(call_sid).update(twiml=twiml)
+        logger.info(f"Call {call_sid} transferred to {transfer_to}")
+    except Exception:
+        logger.exception(f"Failed to transfer call {call_sid}")
 
 
 if __name__ == "__main__":
