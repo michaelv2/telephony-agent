@@ -17,7 +17,7 @@ Caller → Twilio (mulaw 8kHz) → Silero VAD → Whisper STT → Claude (stream
 - [ngrok](https://ngrok.com/) (for local development)
 - A Twilio account with a phone number and API keys
 - An Anthropic API key
-- The [tts-server](../tts-server) running (supports Kokoro, Chatterbox, Qwen3, and Orpheus backends)
+- The [tts-server](https://github.com/michaelv2/tts-server) running (supports Kokoro, Chatterbox, Qwen3, and Orpheus backends)
 
 ## Setup
 
