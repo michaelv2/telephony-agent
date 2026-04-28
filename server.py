@@ -39,15 +39,52 @@ _transfer_numbers: dict[str, str] = {}
 _DEBOUNCE_SECONDS = 0.3
 
 # If held text hasn't been released after this many seconds, flush it anyway.
-_HOLD_TIMEOUT_SECONDS = 4.0
+_HOLD_TIMEOUT_SECONDS = 2.0
+
+# Patterns that indicate a clearly complete turn — skip LLM classification
+_COMPLETE_PATTERNS = (
+    "what do you think",
+    "what's your view",
+    "what's your take",
+    "your thoughts",
+    "does that make sense",
+    "if that makes sense",
+    "what do you say",
+    "do you agree",
+    "would you say",
+    "can you elaborate",
+    "i can elaborate",
+    "go ahead",
+    "over to you",
+    "right?",
+    "yeah?",
+)
+
+
+def _is_obviously_complete(text: str) -> bool:
+    """Fast check for clearly complete turns — avoids the LLM round-trip."""
+    lower = text.lower().rstrip()
+    # Any question in the last ~60 chars is likely turn-final
+    tail = lower[-60:]
+    if "?" in tail:
+        return True
+    return any(p in lower for p in _COMPLETE_PATTERNS)
 
 
 async def _is_complete_turn(text: str) -> bool:
-    """Use Haiku to determine if a transcript is a complete conversational turn."""
+    """Determine if a transcript is a complete conversational turn.
+
+    Fast-paths obvious cases, falls back to Haiku for ambiguous ones.
+    """
+    if _is_obviously_complete(text):
+        return True
+
     import anthropic as _anthropic
 
     client = _anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
     try:
+        # Only send the last ~200 chars for speed
+        context = text[-200:] if len(text) > 200 else text
         resp = await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=10,
@@ -57,7 +94,7 @@ async def _is_complete_turn(text: str) -> bool:
                 "their turn (complete thought) or is mid-sentence/pausing briefly. "
                 "Respond with exactly one word: COMPLETE or INCOMPLETE."
             ),
-            messages=[{"role": "user", "content": text}],
+            messages=[{"role": "user", "content": context}],
         )
         result = resp.content[0].text.strip().upper()
         return result == "COMPLETE"

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { font-family: Arial, sans-serif; max-width: 700px; margin: 40px auto; line-height: 1.6; color: #333; }
+h1 { font-size: 20px; border-bottom: 1px solid #ccc; padding-bottom: 10px; }
+h2 { font-size: 16px; margin-top: 30px; }
+.flow { background: #f5f5f5; border-radius: 8px; padding: 20px; margin: 20px 0; }
+.msg { margin: 12px 0; padding: 10px 14px; border-radius: 12px; max-width: 80%; }
+.user { background: #0b93f6; color: white; margin-left: auto; text-align: right; }
+.agent { background: #e5e5ea; color: black; }
+.label { font-size: 11px; color: #888; margin-bottom: 2px; }
+table { border-collapse: collapse; width: 100%; margin: 15px 0; }
+td, th { border: 1px solid #ccc; padding: 8px 12px; text-align: left; font-size: 14px; }
+th { background: #f0f0f0; }
+</style>
+</head>
+<body>
+
+<h1>SMS Consent Documentation — Personal AI Phone Assistant</h1>
+
+<h2>Service Description</h2>
+<p>This is a personal AI phone assistant that makes outbound calls on behalf of its user (e.g., scheduling appointments, making reservations). SMS is used as the input/output interface: the user texts a request, and the service texts back a confirmation and eventual outcome summary.</p>
+
+<h2>Consent Model: User-Initiated</h2>
+<p>All messaging is initiated by the user. The service never sends unsolicited messages. The only SMS messages sent by the service are direct responses to user-initiated requests:</p>
+
+<table>
+<tr><th>Message Type</th><th>Direction</th><th>Trigger</th></tr>
+<tr><td>Call request</td><td>User &rarr; Service</td><td>User sends SMS with instructions</td></tr>
+<tr><td>Acknowledgment</td><td>Service &rarr; User</td><td>Immediate reply to user's request</td></tr>
+<tr><td>Call outcome summary</td><td>Service &rarr; User</td><td>After the requested call completes</td></tr>
+</table>
+
+<h2>Example Interaction Flow</h2>
+<div class="flow">
+<div class="label">User initiates:</div>
+<div class="msg user">Call 555-123-4567 and schedule a dental cleaning for next Tuesday</div>
+
+<div class="label">Service acknowledges:</div>
+<div class="msg agent">Got it! Calling +15551234567 now. I'll text you when it's done.</div>
+
+<div class="label">Service reports outcome:</div>
+<div class="msg agent">Call complete: Dental cleaning scheduled for Tues May 5 at 10am with Dr. Smith</div>
+</div>
+
+<h2>Key Points</h2>
+<ul>
+<li>Messages are only sent to the same phone number that initiated the request</li>
+<li>No marketing, promotional, or broadcast messaging</li>
+<li>No third-party recipients — all messages go back to the requesting user</li>
+<li>Only authorized phone numbers (pre-configured by the service owner) can trigger calls</li>
+<li>The service is for personal use only</li>
+</ul>
+
+</body>
+</html>

@@ -9,6 +9,13 @@ source .env 2>/dev/null || true
 set +a
 PORT="${PORT:-9002}"
 
+# Log full console output to timestamped file
+LOGS_DIR="$(dirname "$0")/logs"
+mkdir -p "$LOGS_DIR"
+LOG_FILE="$LOGS_DIR/$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "[*] Logging to $LOG_FILE"
+
 cleanup() {
     echo "[*] Shutting down..."
     kill $AGENT_PID 2>/dev/null
