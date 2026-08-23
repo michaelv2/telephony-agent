@@ -10,7 +10,7 @@ from config import AGENT_PROMPT, ANTHROPIC_API_KEY
 
 logger = logging.getLogger("agent")
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 SYSTEM_PROMPT = AGENT_PROMPT
 
@@ -36,13 +36,13 @@ class CallAgent:
         buffer = ""
         full_response = ""
 
-        with client.messages.stream(
+        async with client.messages.stream(
             model="claude-sonnet-4-6",
             max_tokens=200,
             system=self.system,
             messages=self.messages,
         ) as stream:
-            for text in stream.text_stream:
+            async for text in stream.text_stream:
                 buffer += text
                 full_response += text
 

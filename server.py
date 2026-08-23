@@ -7,8 +7,9 @@ from datetime import datetime
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
+from twilio.request_validator import RequestValidator
 from twilio.rest import Client as TwilioClient
 
 import config
@@ -26,6 +27,19 @@ logger = logging.getLogger("server")
 
 app = FastAPI(title="Telephony Agent")
 
+_twilio_validator = RequestValidator(config.TWILIO_AUTH_TOKEN)
+
+
+async def _require_twilio_signature(request: Request) -> None:
+    """Validate that the request was signed by Twilio."""
+    signature = request.headers.get("X-Twilio-Signature", "")
+    # Twilio signs against the public URL, not the local one behind ngrok
+    url = config.get_public_url() + request.url.path
+    form = await request.form()
+    params = dict(form)
+    if not _twilio_validator.validate(url, params, signature):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
 # Shared STT instance (model loaded once)
 stt_engine: WhisperSTT | None = None
 
@@ -34,12 +48,8 @@ _call_contexts: dict[str, str] = {}
 # Transfer-to number stored by call SID
 _transfer_numbers: dict[str, str] = {}
 
-# Debounce window: wait this long after a transcript before responding,
-# in case more speech is coming.
-_DEBOUNCE_SECONDS = 0.3
-
 # If held text hasn't been released after this many seconds, flush it anyway.
-_HOLD_TIMEOUT_SECONDS = 2.0
+_HOLD_TIMEOUT_SECONDS = 1.0
 
 # Patterns that indicate a clearly complete turn — skip LLM classification
 _COMPLETE_PATTERNS = (
@@ -61,47 +71,49 @@ _COMPLETE_PATTERNS = (
 )
 
 
+_INCOMPLETE_TRAIL = (
+    " and", " but", " or", " so", " because", " since", " although",
+    " however", " yet", " while", " when", " if", " that", " which",
+    " who", " where", " then", " also", " to", " for", " with",
+    " about", " like", " just", " the", " a", " an", " my", " your",
+    " their", " its", " of", " in", " on", " at", " is", " are",
+    " was", " were", " i'm", " we're", " they're", " it's",
+)
+
+
 def _is_obviously_complete(text: str) -> bool:
-    """Fast check for clearly complete turns — avoids the LLM round-trip."""
+    """Fast check for clearly complete turns — questions and turn-yielding phrases."""
     lower = text.lower().rstrip()
-    # Any question in the last ~60 chars is likely turn-final
     tail = lower[-60:]
     if "?" in tail:
         return True
     return any(p in lower for p in _COMPLETE_PATTERNS)
 
 
-async def _is_complete_turn(text: str) -> bool:
+def _is_complete_turn(text: str) -> bool:
     """Determine if a transcript is a complete conversational turn.
 
-    Fast-paths obvious cases, falls back to Haiku for ambiguous ones.
+    Uses local heuristics only — no network calls.
+    See CHANGELOG-latency.md for why the Haiku LLM fallback was removed.
     """
     if _is_obviously_complete(text):
         return True
 
-    import anthropic as _anthropic
+    stripped = text.strip()
+    if not stripped:
+        return False
 
-    client = _anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
-    try:
-        # Only send the last ~200 chars for speed
-        context = text[-200:] if len(text) > 200 else text
-        resp = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=10,
-            system=(
-                "You are a turn-detection classifier for a voice conversation. "
-                "Given a transcript segment, determine if the speaker has finished "
-                "their turn (complete thought) or is mid-sentence/pausing briefly. "
-                "Respond with exactly one word: COMPLETE or INCOMPLETE."
-            ),
-            messages=[{"role": "user", "content": context}],
-        )
-        result = resp.content[0].text.strip().upper()
-        return result == "COMPLETE"
-    except Exception:
-        # On error, assume complete to avoid holding indefinitely
-        logger.warning("Turn detection failed, assuming complete")
-        return True
+    if stripped[-1] in ".!?":
+        words = stripped.split()
+        if len(words) >= 3:
+            return True
+
+    lower = stripped.lower()
+    for trail in _INCOMPLETE_TRAIL:
+        if lower.endswith(trail):
+            return False
+
+    return False
 
 # Transcript archive directory
 _TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
@@ -141,7 +153,7 @@ async def startup():
 # --- TwiML Webhooks ---
 
 
-@app.post("/call/inbound")
+@app.post("/call/inbound", dependencies=[Depends(_require_twilio_signature)])
 async def call_inbound(request: Request):
     """Twilio webhook for incoming calls. Returns TwiML to connect Media Stream."""
     ws_url = config.get_public_url().replace("http", "ws") + "/ws/media"
@@ -154,7 +166,7 @@ async def call_inbound(request: Request):
     return Response(content=twiml, media_type="application/xml")
 
 
-@app.post("/call/outbound")
+@app.post("/call/outbound", dependencies=[Depends(_require_twilio_signature)])
 async def call_outbound(request: Request):
     """TwiML for outbound calls — same Stream connection."""
     ws_url = config.get_public_url().replace("http", "ws") + "/ws/media"
@@ -170,7 +182,7 @@ async def call_outbound(request: Request):
 # --- SMS Webhook ---
 
 
-@app.post("/sms/inbound")
+@app.post("/sms/inbound", dependencies=[Depends(_require_twilio_signature)])
 async def sms_inbound(request: Request):
     """Twilio webhook for incoming SMS. Parses the message and initiates an outbound call."""
     form = await request.form()
@@ -316,12 +328,10 @@ async def media_stream(ws: WebSocket):
     transfer_number: str | None = None
 
     async def _debounced_respond(text: str) -> None:
-        """Wait for debounce, check turn completeness, then fire the response."""
-        await asyncio.sleep(_DEBOUNCE_SECONDS)
+        """Check turn completeness and fire the response (no debounce delay)."""
         nonlocal pending_text, response_task, hold_timeout_task
 
-        # Ask Haiku if this is a complete turn
-        is_complete = await _is_complete_turn(text)
+        is_complete = _is_complete_turn(text)
 
         if not is_complete:
             pending_text = text
@@ -492,11 +502,9 @@ async def _stream_agent_response(
 
             full_response += (" " if full_response else "") + sentence
 
-            # Send each sentence to TTS immediately — don't wait for full response
+            # Stream TTS audio to Twilio as chunks arrive — don't wait for full sentence audio
             if sentence:
-                chunks = await tts.synthesize(sentence)
-
-                for chunk in chunks:
+                async for chunk in tts.synthesize_stream(sentence):
                     if not connected.is_set():
                         logger.info("Connection closed, aborting response")
                         return
@@ -506,8 +514,7 @@ async def _stream_agent_response(
                         "media": {"payload": chunk},
                     }
                     await ws.send_text(json.dumps(media_msg))
-
-                total_chunks += len(chunks)
+                    total_chunks += 1
 
             if should_transfer:
                 break

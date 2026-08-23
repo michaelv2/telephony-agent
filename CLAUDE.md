@@ -23,7 +23,7 @@ Set Twilio voice webhook to `{PUBLIC_URL}/call/inbound` (POST).
 ## Required Environment Variables (.env)
 
 - `ANTHROPIC_API_KEY`
-- `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `TWILIO_PHONE`
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `TWILIO_PHONE`
 
 Optional: `TTS_URL`, `TTS_VOICE` (`af_heart`), `WHISPER_MODEL` (`base.en`), `PORT` (`9002`), `PUBLIC_URL` (auto-detected from ngrok), `AGENT_PROMPT`.
 
@@ -42,6 +42,10 @@ The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whi
 **`stt/`** — Pluggable STT behind `BaseSTT` ABC. `WhisperSTT` uses Silero VAD (512-sample frames at 16kHz) to detect speech boundaries, accumulates audio during speech, transcribes with faster-whisper after 800ms silence. VAD + transcription run in the event loop / executor respectively.
 
 **`config.py`** — All config from env vars via `python-dotenv`. `get_public_url()` auto-detects ngrok tunnel URL by querying `localhost:4040/api/tunnels`.
+
+## Latency Changelog
+
+`CHANGELOG-latency.md` tracks all changes to the turn-to-turn latency pipeline — VAD thresholds, debounce/turn-detection logic, TTS streaming behavior, and anything else that affects how fast the agent responds after the user stops speaking. Before modifying any of these, read the changelog to understand why the current values exist. After making a change, add an entry recording what changed, why, what it replaced, and what to watch for if it regresses. The goal is to prevent revert loops where we fix a latency issue, forget why, hit a side effect, revert, and end up back where we started.
 
 ## Key Design Decisions
 
