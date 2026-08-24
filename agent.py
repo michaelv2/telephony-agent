@@ -37,8 +37,8 @@ class CallAgent:
         full_response = ""
 
         async with client.messages.stream(
-            model="claude-sonnet-4-6",
-            max_tokens=200,
+            model="claude-sonnet-5",
+            max_tokens=500,
             system=self.system,
             messages=self.messages,
         ) as stream:
