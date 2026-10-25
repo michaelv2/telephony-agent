@@ -3,11 +3,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Model argument: ./start.sh [model]   (default: kokoro)
+TTS_MODEL="${1:-kokoro}"
+TTS_SERVER_DIR="${TTS_SERVER_DIR:-$(cd "$(dirname "$0")/.." && pwd)/tts-server}"
+
 # Load .env for PORT
 set -a
 source .env 2>/dev/null || true
 set +a
 PORT="${PORT:-9002}"
+TTS_URL="${TTS_URL:-http://localhost:9100}"
+TTS_PORT="${TTS_PORT:-9100}"
 
 # Log full console output to timestamped file
 LOGS_DIR="$(dirname "$0")/logs"
@@ -18,8 +24,9 @@ echo "[*] Logging to $LOG_FILE"
 
 cleanup() {
     echo "[*] Shutting down..."
-    kill $AGENT_PID 2>/dev/null
-    kill $NGROK_PID 2>/dev/null
+    kill "${AGENT_PID:-}" 2>/dev/null || true
+    kill "${NGROK_PID:-}" 2>/dev/null || true
+    kill "${TTS_PID:-}" 2>/dev/null || true
     wait 2>/dev/null
     echo "[*] Stopped"
 }
@@ -40,6 +47,26 @@ done
 if [ -z "${NGROK_URL:-}" ]; then
     echo "[!] Failed to get ngrok URL"
     exit 1
+fi
+
+# Start the TTS server (kokoro by default; override with ./start.sh <model>)
+echo "[*] Starting TTS server (model: $TTS_MODEL) on port $TTS_PORT..."
+if [[ ! -x "$TTS_SERVER_DIR/run.sh" ]]; then
+    echo "[!] TTS server not found at $TTS_SERVER_DIR (set TTS_SERVER_DIR to override)"
+    exit 1
+fi
+( cd "$TTS_SERVER_DIR" && exec ./run.sh "$TTS_MODEL" --port "$TTS_PORT" ) &
+TTS_PID=$!
+
+# Wait for TTS to come up (models load slowly on GPU)
+for i in $(seq 1 60); do
+    curl -sf "$TTS_URL/health" >/dev/null 2>&1 && break
+    sleep 1
+done
+if curl -sf "$TTS_URL/health" >/dev/null 2>&1; then
+    echo "[*] TTS server ready"
+else
+    echo "[!] TTS server not responding on $TTS_URL — agent voice replies will fail"
 fi
 
 # Start the agent (it auto-detects ngrok URL via localhost:4040)
@@ -173,5 +200,5 @@ echo ""
 echo "[*] Ready — waiting for calls"
 echo ""
 
-# Wait for either process to exit
-wait -n $AGENT_PID $NGROK_PID
+# Wait for any of the three processes to exit
+wait -n "$AGENT_PID" "$NGROK_PID" "$TTS_PID"
