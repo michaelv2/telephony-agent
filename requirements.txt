@@ -3,6 +3,7 @@ uvicorn[standard]
 websockets
 anthropic
 faster-whisper
+torch
 numpy
 soundfile
 httpx
