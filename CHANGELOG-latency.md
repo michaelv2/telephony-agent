@@ -188,6 +188,78 @@ The binary protocol now communicates that in the header.
 
 ---
 
+### 4. Two-stage end-of-turn detection (2026-10-27)
+
+**Status:** Applied on branch `turn-latency`. Tests in `test_endpointing.py` (4 cases).
+Measured with `bench_turn_latency.py`.
+
+**What changed:**
+- `stt/whisper_stt.py`: Whisper now runs after `VAD_EARLY_MS` (default 400ms) of silence instead
+  of 800ms. The end of turn is signalled separately, through `pop_end_of_turn()`, once silence
+  reaches `VAD_SILENCE_MS` (default 800ms). Speech before that cancels it, and the next
+  transcript is appended to the held text.
+- `server.py`: a transcript that `_is_obviously_complete()` accepts responds immediately, at the
+  early mark. That means a `?` near the end, or a turn-yielding phrase. Everything else waits
+  for the end of turn, then goes through `_is_complete_turn()` and the hold logic as before.
+- `server.py`: the hold-timeout flush is cancelled when the caller starts speaking again, so
+  held text is no longer flushed in the middle of their next utterance.
+- `config.py`: new `VAD_EARLY_MS` and `VAD_SILENCE_MS` variables.
+- Logging per turn:
+  - `Transcript (+N ms after speech end, whisper M ms)`
+  - `Latency: respond +A, first sentence +B, first audio +C` (all measured from the end of speech)
+
+**Why:** Whisper only started after the full 800ms of silence, so its ~200ms (base.en) was on
+the critical path of every turn. Questions are the clearest end-of-turn signal, and they don't
+need the full wait.
+
+**What it replaced:** a single 800ms threshold, where transcription and the end of turn were the
+same event. Simply lowering that threshold was rejected: entry 1 records that 800ms already
+caught people mid-thought.
+
+**Measured** (2026-10-27): the same code with `VAD_EARLY_MS=800` and `=400`. Each ran 12
+synthetic turns, with Phonon TTS.
+
+| Stage | 800 (old) | 400/800 (new) |
+|---|---|---|
+| End of turn, statements | 1022ms | 800ms |
+| End of turn, questions | 1042ms | 622ms |
+| Claude first sentence | 1871ms | 1988ms (noise: 1.1-4.2s per turn) |
+| TTS first audio | 22ms | 20ms |
+| End to end, harness | 3084ms | 2879ms |
+
+**Pause tolerance** (`bench_turn_latency.py 2 --pauses ...`): the caller says a line, pauses for
+the given time (voiced to voiced), then keeps going. The cell counts runs where agent audio
+arrived before the caller finished, out of 2:
+
+| Pause | Question, old | Question, new | Statement, old | Statement, new |
+|---|---|---|---|---|
+| 0.5-1.5s | 0/2 | 0/2 | 0/2 | 0/2 |
+| 2s | 0/2 | 0/2 | 1/2 | 1/2 |
+| 2.5s | 0/2 | **2/2** | 1/2 | 0/2 |
+| 3s | 2/2 | 2/2 | 2/2 | 2/2 |
+
+Replies started and then dropped before any audio: 14 (old) and 15 (new).
+- **Where the boundary sits.** A pause is safe while it is shorter than end-of-turn time plus
+  Claude's time to its first sentence plus TTS. Step 1 moved the boundary for questions about
+  0.5s earlier, from 3s to 2.5s. Statements didn't change measurably.
+- **Anything that makes Claude faster moves the boundary earlier by the same amount.** The two
+  effects interact.
+- **Barge-in doesn't flush Twilio's buffer.** No `clear` message is sent, so once audio is out
+  the caller hears that whole sentence, even if they talk over it.
+
+**What to watch for if this causes problems:**
+- **The agent jumps in after a question when the caller keeps going.** For example "Do you have
+  Tuesday? ... or maybe Wednesday." The reply starts about 620ms after the question. Barge-in
+  cancels it, but the caller hears its first syllables. The fix is to raise `VAD_EARLY_MS` (to
+  500-600). Don't collapse back to a single threshold.
+- **Damage where a mid-sentence pause splits the transcript.** A pause of 400-800ms gets the two
+  halves transcribed separately and joined. Watch for words dropped or garbled at the join.
+- **Rollback:** `VAD_EARLY_MS=800` restores the old timing exactly. The hold-timeout cancel stays.
+
+**Expected savings:** about 220ms per statement and 420ms per question. Both measured.
+
+---
+
 ## Decision log
 
 | Date       | Decision                            | Rationale                                                     |
@@ -196,3 +268,5 @@ The binary protocol now communicates that in the header.
 | 2026-08-23 | Prioritized debounce removal first  | Biggest savings (500-800ms), lowest complexity, pure deletion  |
 | 2026-08-23 | Chose local heuristics over Haiku   | Network round-trip too expensive for latency-critical path     |
 | 2026-08-23 | Async client before TTS streaming   | Unblocks event loop, prerequisite for proper TTS pipelining    |
+| 2026-10-27 | Two-stage endpointing, not a shorter threshold | Hides Whisper in the silence; statements still wait 800ms |
+| 2026-10-27 | Per-stage latency logs + bench harness  | Claude's 1.1-4.2s variance hides 200-400ms wins end to end    |

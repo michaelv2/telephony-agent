@@ -39,7 +39,7 @@ The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whi
 
 **`tts.py`** — Async HTTP client to external Kokoro TTS server. Sends text, receives WAV, converts to Twilio-ready mulaw chunks.
 
-**`stt/`** — Pluggable STT behind `BaseSTT` ABC. `WhisperSTT` uses Silero VAD (512-sample frames at 16kHz) to detect speech boundaries, accumulates audio during speech, transcribes with faster-whisper after 800ms silence. VAD + transcription run in the event loop / executor respectively.
+**`stt/`** — Pluggable STT behind `BaseSTT` ABC. `WhisperSTT` uses Silero VAD (512-sample frames at 16kHz) to detect speech boundaries, accumulates audio during speech, transcribes with faster-whisper after 400ms silence (`VAD_EARLY_MS`), and signals end of turn after 800ms (`VAD_SILENCE_MS`); questions respond at the early mark. VAD + transcription run in the event loop / executor respectively.
 
 **`config.py`** — All config from env vars via `python-dotenv`. `get_public_url()` auto-detects ngrok tunnel URL by querying `localhost:4040/api/tunnels`.
 
@@ -50,6 +50,6 @@ The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whi
 ## Key Design Decisions
 
 - **Sentence-level streaming**: Claude's response is split on sentence boundaries and each sentence is sent to TTS independently, rather than waiting for the full response. This is the core latency optimization.
-- **VAD-gated transcription**: Audio is only sent to Whisper after Silero VAD detects end-of-speech (800ms silence), avoiding constant transcription of silence/noise.
+- **VAD-gated transcription**: Audio is only sent to Whisper after Silero VAD detects a pause (400ms silence), avoiding constant transcription of silence/noise. The turn ends at 800ms unless the transcript is a question (CHANGELOG-latency.md, entry 4).
 - **Synchronous Anthropic client**: `agent.py` uses `anthropic.Anthropic` (sync) with `.messages.stream()`, wrapped in async generators. The sync streaming runs in the calling coroutine's thread.
 - **One STT instance**: `WhisperSTT` is loaded once at startup as a global. Models are GPU-resident (`cuda`, `float16`).

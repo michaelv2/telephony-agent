@@ -1,8 +1,44 @@
 # TODO
 
+## Latency plan (from 2026-10-27)
+
+Step 1, two-stage end-of-turn detection, is applied on branch `turn-latency` (CHANGELOG-latency.md, entry 4). Planned order: barge-in fix, then step 2, then adaptive waits. Measure each one with `bench_turn_latency.py`, using both the standard turns and `--pauses`, and with a live call before starting the next. Steps 1 and 2 interact: a pause is safe only while it's shorter than end-of-turn time plus Claude's first sentence plus TTS.
+
+### Barge-in (next; doesn't change reply timing)
+
+- [ ] **Track playback with Twilio `mark` messages**: Keep `speaking` set until the last mark comes back. Today it clears when sending ends, so barge-in stops working while most of the reply is still playing. Phonon sends 5 s of audio in under 1 s.
+- [ ] **Send Twilio `clear` on barge-in**: Discard the queued audio. Today the caller hears every sentence already sent, even after talking over it.
+- [ ] **Require ~250ms of continuous speech before barge-in**: Today a single 32ms VAD frame triggers it. Once `clear` is sent, a cough or "mm-hmm" would cut the agent off.
+- [ ] **Record what the caller actually heard in Claude's history**: Today an interrupted reply leaves nothing in the history, although the caller may have heard a whole sentence.
+- [ ] **Measure**:
+  - Add a harness metric for agent audio played after the caller starts talking. Today that's about a sentence; the target is a few hundred ms.
+  - Add a false-trigger test: a cough and a "mm-hmm" while the agent is speaking.
+  - Re-run the pause sweep to confirm the cut-in boundaries don't move.
+
+### Claude's first sentence (step 2)
+
+- [ ] **First-chunk clause splitting first** (see Latency optimizations below). Measure it, then decide whether to try a faster reply model such as Haiku. That's a quality trade-off, best judged on a call. Every ms saved also shortens the safe pause, so re-run the pause sweep afterwards.
+
+### Streaming transcription (step 3)
+
+- [ ] **Transcribe while the caller is still speaking**: Step 1 already hides most of Whisper's ~200ms inside the silence wait. The remaining gain is mostly on long utterances, and this is the most complex change. Re-evaluate once steps 1 and 2 are measured.
+
+### Dynamic patience (turn detection)
+
+- [ ] **Adapt the silence wait per caller**: Lengthen it after evidence of mid-thought pauses, for example +300ms after a reply dropped before any audio and +500ms after a heard cut-in, capped at ~2s. Joined transcripts are also evidence. Let it drift back down on clean turns. Log the wait on every turn so changes can still be told apart.
+- [ ] **Expectation-aware waits**: Claude tags its own question, like `[TRANSFER]`, e.g. `[EXPECT: yes_no|phone|date|open]`. Use a short wait after yes/no, wait for enough digits after asking for a phone number, and be patient after open-ended or emotional questions.
+- [ ] **`[PACE: patient]` tag**: For conversations that turn reflective. Complements adaptive waits, which react to how the caller actually pauses.
+- [ ] **Hold on trailing digits**: Phone numbers, dates and addresses get read out with pauses ("555… 867… 5309"), and `_is_complete_turn` doesn't treat trailing digits as unfinished.
+- [ ] **If retrying a turn-detection model, only let it extend the wait, never shorten it**: A wrong guess then costs a slower reply, not an interruption. Judge it against the pause sweep and live-call logs.
+
+### Infrastructure
+
+- [ ] **Per-call STT state**: One `WhisperSTT` instance holds the VAD state and buffers for every call, so simultaneous calls collide. Per-call waits need it split; keep the Whisper model shared.
+- [ ] **Let preset env vars override `.env` in `start.sh`**: It sources `.env` after the environment, so `TTS_VOICE=freya ./start.sh phonon` can't change the voice. On 2026-10-27 that took a hand-written launcher.
+
 ## Turn detection improvements
 
-- [ ] **Transcript accumulation**: Buffer for a short window (~500ms) after transcription. If another segment arrives in that window, concatenate before responding. Catches mid-sentence pauses without relying solely on linguistic heuristics.
+- [ ] **Transcript accumulation**: Buffer for a short window (~500ms) after transcription. If another segment arrives in that window, concatenate before responding. Catches mid-sentence pauses without relying solely on linguistic heuristics. (Partly covered by two-stage endpointing: speech between 400 and 800ms of silence is joined.)
 - [x] **LLM-based turn detection**: Uses Haiku to classify whether a transcript is a complete conversational turn. Replaces the suffix heuristic. Runs during the debounce window. Falls back to flush after 4s timeout if held.
 
 ## Latency optimizations

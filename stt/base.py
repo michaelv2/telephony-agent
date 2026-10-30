@@ -13,6 +13,10 @@ class BaseSTT(ABC):
         """Return transcript if speech just ended, else None."""
 
     @abstractmethod
+    def pop_end_of_turn(self) -> bool:
+        """True once, when silence after the last transcript reaches the end-of-turn threshold."""
+
+    @abstractmethod
     def reset(self) -> None:
         """Clear buffers for a new utterance."""
 

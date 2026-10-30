@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -147,7 +148,11 @@ class TranscriptLog:
 @app.on_event("startup")
 async def startup():
     global stt_engine
-    stt_engine = WhisperSTT(model_size=config.WHISPER_MODEL)
+    stt_engine = WhisperSTT(
+        model_size=config.WHISPER_MODEL,
+        silence_threshold_ms=config.VAD_SILENCE_MS,
+        early_threshold_ms=config.VAD_EARLY_MS,
+    )
 
 
 # --- TwiML Webhooks ---
@@ -347,7 +352,7 @@ async def media_stream(ws: WebSocket):
             response_task = asyncio.create_task(
                 _stream_agent_response(
                     ws, agent, stream_sid, call_sid, connected, speaking, transcript_log,
-                    transfer_number, user_text=text
+                    transfer_number, user_text=text, turn_t0=stt_engine.speech_ended_at
                 )
             )
 
@@ -362,7 +367,7 @@ async def media_stream(ws: WebSocket):
             response_task = asyncio.create_task(
                 _stream_agent_response(
                     ws, agent, stream_sid, call_sid, connected, speaking, transcript_log,
-                    transfer_number, user_text=text
+                    transfer_number, user_text=text, turn_t0=stt_engine.speech_ended_at
                 )
             )
 
@@ -412,6 +417,10 @@ async def media_stream(ws: WebSocket):
                     speaking.clear()
                     logger.info("Barge-in detected (VAD)")
 
+                # Caller resumed speaking: don't flush held text in the middle of their utterance
+                if stt_engine.speech_active and hold_timeout_task and not hold_timeout_task.done():
+                    hold_timeout_task.cancel()
+
                 transcript = await stt_engine.get_transcript()
 
                 if transcript:
@@ -426,7 +435,16 @@ async def media_stream(ws: WebSocket):
                     combined = (pending_text + " " + transcript).strip() if pending_text else transcript
                     pending_text = ""
 
-                    debounce_task = asyncio.create_task(_debounced_respond(combined))
+                    # Transcripts arrive at the early silence threshold. Questions and turn-yielding
+                    # phrases respond now; everything else waits for the end of turn below.
+                    if _is_obviously_complete(combined):
+                        debounce_task = asyncio.create_task(_debounced_respond(combined))
+                    else:
+                        pending_text = combined
+
+                if stt_engine.pop_end_of_turn() and pending_text:
+                    text, pending_text = pending_text, ""
+                    debounce_task = asyncio.create_task(_debounced_respond(text))
 
             elif event == "stop":
                 # Cancel debounce/timeout and flush any pending text
@@ -438,7 +456,8 @@ async def media_stream(ws: WebSocket):
                     response_task = asyncio.create_task(
                         _stream_agent_response(
                             ws, agent, stream_sid, call_sid, connected, speaking,
-                            transcript_log, transfer_number, user_text=pending_text
+                            transcript_log, transfer_number, user_text=pending_text,
+                            turn_t0=stt_engine.speech_ended_at,
                         )
                     )
                     pending_text = ""
@@ -469,9 +488,16 @@ async def _stream_agent_response(
     user_text: str | None = None,
     greeting: bool = False,
     on_done: asyncio.Event | None = None,
+    turn_t0: float | None = None,
 ) -> None:
-    """Stream Claude's response sentence-by-sentence through TTS to Twilio."""
+    """Stream Claude's response sentence-by-sentence through TTS to Twilio.
+
+    turn_t0 is the time.monotonic() at which the caller stopped speaking, for latency logging.
+    """
     should_transfer = False
+    started_at = time.monotonic()
+    first_sentence_at: float | None = None
+    total_chunks = 0
 
     try:
         if greeting:
@@ -481,7 +507,6 @@ async def _stream_agent_response(
             if transcript_log:
                 transcript_log.user(user_text)
 
-        total_chunks = 0
         full_response = ""
         speaking.set()
 
@@ -489,6 +514,7 @@ async def _stream_agent_response(
             if not connected.is_set():
                 logger.info("Connection closed, aborting response")
                 return
+            first_sentence_at = first_sentence_at or time.monotonic()
 
             # Check for transfer signal
             if _TRANSFER_TAG in sentence:
@@ -515,6 +541,13 @@ async def _stream_agent_response(
                     }
                     await ws.send_text(json.dumps(media_msg))
                     total_chunks += 1
+                    if total_chunks == 1 and turn_t0 is not None:
+                        now = time.monotonic()
+                        logger.info(
+                            f"Latency: respond +{(started_at - turn_t0) * 1000:.0f}ms, "
+                            f"first sentence +{(first_sentence_at - turn_t0) * 1000:.0f}ms, "
+                            f"first audio +{(now - turn_t0) * 1000:.0f}ms after end of speech"
+                        )
 
             if should_transfer:
                 break
@@ -534,7 +567,11 @@ async def _stream_agent_response(
             await _send_sms(transfer_number, summary_match.group(1))
 
     except asyncio.CancelledError:
-        logger.info("Response cancelled (barge-in)")
+        # Audio already sent keeps playing from Twilio's buffer, so "after" means the caller heard it.
+        logger.info(
+            f"Response cancelled (barge-in) after {total_chunks} audio chunks"
+            if total_chunks else "Response cancelled (barge-in) before any audio"
+        )
     except Exception:
         logger.exception("Error in agent response pipeline")
     finally:

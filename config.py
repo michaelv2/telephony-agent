@@ -21,6 +21,12 @@ TTS_VOICE = os.environ.get("TTS_VOICE", "af_heart")
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base.en")
 
+# End-of-speech detection (see CHANGELOG-latency.md): transcribe after VAD_EARLY_MS of silence and
+# end the turn after VAD_SILENCE_MS. Questions and turn-yielding phrases respond at the early mark.
+# VAD_EARLY_MS=VAD_SILENCE_MS restores single-threshold behaviour.
+VAD_SILENCE_MS = int(os.environ.get("VAD_SILENCE_MS", "800"))
+VAD_EARLY_MS = int(os.environ.get("VAD_EARLY_MS", "400"))
+
 PORT = int(os.environ.get("PORT", "9002"))
 
 PUBLIC_URL = os.environ.get("PUBLIC_URL", f"http://localhost:{PORT}")
