@@ -6,6 +6,8 @@ Step 1, two-stage end-of-turn detection, is applied on branch `turn-latency` (CH
 
 ### Barge-in (next; doesn't change reply timing)
 
+Ship marks, `clear` and the 250ms gate as one change: `clear` does little without marks, and without the gate a cough cuts the agent off mid-sentence. Do the harness work under **Measure** first. `bench_turn_latency.py` ignores `mark` and `clear` today, so it can't show the fix.
+
 - [ ] **Track playback with Twilio `mark` messages**: Keep `speaking` set until the last mark comes back. Today it clears when sending ends, so barge-in stops working while most of the reply is still playing. Phonon sends 5 s of audio in under 1 s.
 - [ ] **Send Twilio `clear` on barge-in**: Discard the queued audio. Today the caller hears every sentence already sent, even after talking over it.
 - [ ] **Require ~250ms of continuous speech before barge-in**: Today a single 32ms VAD frame triggers it. Once `clear` is sent, a cough or "mm-hmm" would cut the agent off.
