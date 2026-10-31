@@ -38,6 +38,7 @@ os.environ.setdefault("TWILIO_PHONE", "+10000000000")
 from fastapi import WebSocketDisconnect  # noqa: E402
 
 import server  # noqa: E402
+import turn_taking  # noqa: E402
 
 HOLD_S = 0.1  # hold timeout used in these tests (production: 1s)
 GREETING_S = 0.02  # how long the fake greeting takes to send
@@ -157,7 +158,7 @@ def run_call(monkeypatch, script: list, greeting_s: float = GREETING_S) -> list:
     monkeypatch.setattr(server, "twilio_payload_to_pcm16k", lambda payload: payload)
     monkeypatch.setattr(server, "CallAgent", lambda context=None: object())
     monkeypatch.setattr(server, "TranscriptLog", FakeTranscriptLog)
-    monkeypatch.setattr(server, "_HOLD_TIMEOUT_SECONDS", HOLD_S)
+    monkeypatch.setattr(turn_taking, "_HOLD_TIMEOUT_SECONDS", HOLD_S)
 
     async def main():
         await server.media_stream(FakeWS(script, log))
@@ -311,6 +312,41 @@ def test_quirk_greeting_finishing_disarms_barge_in_for_overlapping_reply(monkeyp
         START, Wait(0.02), SPEECH, text("Hello?"), Wait(0.15), SPEECH, Wait(0.03),
     ], greeting_s=0.1)
     assert log == [("reply", "greeting"), ("reply", "Hello?"), ("done", "greeting")]
+
+
+# --- Phases (the names used in turn_taking.py's docstring and the timing diagram) ---
+
+
+def test_phases(monkeypatch):
+    monkeypatch.setattr(turn_taking, "_HOLD_TIMEOUT_SECONDS", HOLD_S)
+    L, W, H = turn_taking.Phase.LISTENING, turn_taking.Phase.WAITING, turn_taking.Phase.HOLDING
+
+    async def main():
+        replies = []
+
+        def start_reply(text):
+            replies.append(text)
+            return asyncio.create_task(asyncio.sleep(0))
+
+        t = turn_taking.TurnTaking(start_reply)
+        seen = [t.phase]
+        t.on_transcript("I want to book a cleaning and")
+        seen.append(t.phase)
+        t.on_end_of_turn()  # looks unfinished
+        seen.append(t.phase)
+        t.on_audio(speech_active=True)  # caller speaks again
+        seen.append(t.phase)
+        t.on_end_of_turn()
+        seen.append(t.phase)
+        await asyncio.sleep(HOLD_S + 0.05)  # hold timeout
+        seen.append(t.phase)
+        t.on_transcript("Do you have Tuesday?")  # questions reply at once
+        seen.append(t.phase)
+        return seen, replies
+
+    seen, replies = asyncio.run(main())
+    assert seen == [L, W, H, W, H, L, L]
+    assert replies == ["I want to book a cleaning and", "Do you have Tuesday?"]
 
 
 if __name__ == "__main__":

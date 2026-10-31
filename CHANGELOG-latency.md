@@ -260,6 +260,59 @@ Replies started and then dropped before any audio: 14 (old) and 15 (new).
 
 ---
 
+### 5. Turn-taking moved into `turn_taking.py` (2026-10-31)
+
+**Status:** Applied on branch `turn-latency`. No timing change intended. Tests in
+`test_turn_taking.py` (14 cases). The 13 scenario tests were written and passed against the old
+code first, then passed unchanged after the move.
+
+**What changed:**
+- New `turn_taking.py`. `TurnTaking` holds one call's turn state: the pending text, the hold
+  timer, the current reply, `speaking` and `greeting_done`. It has one method per STT signal,
+  `on_audio`, `on_transcript` and `on_end_of_turn`, plus `greet` and `on_stop`. `phase` names the
+  caller-side state: `LISTENING`, `WAITING` (for end of turn) or `HOLDING`.
+- `_is_obviously_complete`, `_is_complete_turn`, `_COMPLETE_PATTERNS`, `_INCOMPLETE_TRAIL` and
+  `_HOLD_TIMEOUT_SECONDS` moved there from `server.py`. Same names, same code, so searches from
+  entries 1 and 4 still find them.
+- `media_stream` in `server.py` now only feeds STT signals to `TurnTaking` and starts the replies
+  it asks for. `_stream_agent_response` is unchanged.
+- `debounce_task` is gone. Since entry 1, `_debounced_respond` had no delay left; it only ran one
+  event-loop tick after being scheduled. The decision now runs directly. That one tick is the only
+  timing difference.
+- Barge-in and hold log lines now come from the `turn` logger (`[turn]`, not `[server]`).
+
+**Why:** The state was spread across three asyncio Events, three tasks and `pending_text` in
+nested closures in `media_stream`, which made the timing hard to follow. The barge-in work
+(marks, `clear`, 250ms gate) adds more state. The Turn Timing Map diagram uses the same phase
+names.
+
+**What it replaced:** the `_debounced_respond` and `_flush_after_timeout` closures in
+`media_stream`.
+
+**Measured** (2026-10-31): `bench_turn_latency.py 3` and `2 --pauses 0.5,1,1.5,2,2.5,3`, Phonon
+TTS, before and after the move. Reply start comes from the server's `Latency: respond` line.
+
+| Stage | Before | After |
+|---|---|---|
+| Reply start, early mark (questions) | 549ms median, n=9 | 550ms median, n=10 |
+| Reply start, end of turn | 800ms median, n=34 | 800ms median, n=35 |
+| Claude first sentence | 2376ms median | 2323ms median |
+| End to end, harness, all turns | 2577ms | 2740ms (Claude noise) |
+| Barge-ins / dropped before any audio | 19 / 14 | 17 / 13 |
+| Pause sweep: first pause cut into | question 2.5s, statement 2.5s | question 2.5s, statement 2s (1 of 2) |
+
+The pause sweep has 2 runs per cell; the 2s statement cell was also 1 of 2 on 2026-10-27. The
+synthetic utterances never hit the hold path, so holds are only checked by the scenario tests.
+
+**What to watch for if this causes problems:**
+- If replies start or get cut off at different times than before, the move wasn't faithful.
+  Reproduce it as a scenario in `test_turn_taking.py` first; that file pins the old behaviour.
+- The two `test_quirk_*` tests pin current behaviour that is wrong: replies that overlap the
+  greeting (TODO.md, barge-in). The barge-in work should change them on purpose.
+- **Rollback:** revert the commit. No config is involved.
+
+---
+
 ## Decision log
 
 | Date       | Decision                            | Rationale                                                     |
@@ -270,3 +323,4 @@ Replies started and then dropped before any audio: 14 (old) and 15 (new).
 | 2026-08-23 | Async client before TTS streaming   | Unblocks event loop, prerequisite for proper TTS pipelining    |
 | 2026-10-27 | Two-stage endpointing, not a shorter threshold | Hides Whisper in the silence; statements still wait 800ms |
 | 2026-10-27 | Per-stage latency logs + bench harness  | Claude's 1.1-4.2s variance hides 200-400ms wins end to end    |
+| 2026-10-31 | Turn-taking state in one class, no timing change | Hard to follow across closures; barge-in work adds state |

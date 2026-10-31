@@ -18,6 +18,7 @@ import tts
 from agent import CallAgent
 from audio import twilio_payload_to_pcm16k
 from stt import WhisperSTT
+from turn_taking import TurnTaking
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,74 +49,6 @@ stt_engine: WhisperSTT | None = None
 _call_contexts: dict[str, str] = {}
 # Transfer-to number stored by call SID
 _transfer_numbers: dict[str, str] = {}
-
-# If held text hasn't been released after this many seconds, flush it anyway.
-_HOLD_TIMEOUT_SECONDS = 1.0
-
-# Phrases that hand the turn back to the agent. Like a question, they reply at the early mark
-# (VAD_EARLY_MS) instead of waiting for the end of turn.
-_COMPLETE_PATTERNS = (
-    "what do you think",
-    "what's your view",
-    "what's your take",
-    "your thoughts",
-    "does that make sense",
-    "if that makes sense",
-    "what do you say",
-    "do you agree",
-    "would you say",
-    "can you elaborate",
-    "i can elaborate",
-    "go ahead",
-    "over to you",
-    "right?",
-    "yeah?",
-)
-
-
-_INCOMPLETE_TRAIL = (
-    " and", " but", " or", " so", " because", " since", " although",
-    " however", " yet", " while", " when", " if", " that", " which",
-    " who", " where", " then", " also", " to", " for", " with",
-    " about", " like", " just", " the", " a", " an", " my", " your",
-    " their", " its", " of", " in", " on", " at", " is", " are",
-    " was", " were", " i'm", " we're", " they're", " it's",
-)
-
-
-def _is_obviously_complete(text: str) -> bool:
-    """Fast check for clearly complete turns — questions and turn-yielding phrases."""
-    lower = text.lower().rstrip()
-    tail = lower[-60:]
-    if "?" in tail:
-        return True
-    return any(p in lower for p in _COMPLETE_PATTERNS)
-
-
-def _is_complete_turn(text: str) -> bool:
-    """Determine if a transcript is a complete conversational turn.
-
-    Uses local heuristics only — no network calls.
-    See CHANGELOG-latency.md for why the Haiku LLM fallback was removed.
-    """
-    if _is_obviously_complete(text):
-        return True
-
-    stripped = text.strip()
-    if not stripped:
-        return False
-
-    if stripped[-1] in ".!?":
-        words = stripped.split()
-        if len(words) >= 3:
-            return True
-
-    lower = stripped.lower()
-    for trail in _INCOMPLETE_TRAIL:
-        if lower.endswith(trail):
-            return False
-
-    return False
 
 # Transcript archive directory
 _TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
@@ -314,63 +247,33 @@ async def initiate_call(request: Request):
 
 @app.websocket("/ws/media")
 async def media_stream(ws: WebSocket):
-    """Handle Twilio Media Stream WebSocket."""
+    """Handle one call's Twilio Media Stream. Turn-taking decisions are in turn_taking.py."""
     await ws.accept()
     logger.info("WebSocket connected")
 
     agent = None
     stream_sid = None
     call_sid = None
+    transfer_number: str | None = None
+    transcript_log: TranscriptLog | None = None
     connected = asyncio.Event()
     connected.set()
-    speaking = asyncio.Event()  # Set while a reply is being generated or sent; not while it plays
-    greeting_done = asyncio.Event()  # Set once the greeting has been sent (it may still be playing)
-    response_task: asyncio.Task | None = None
-    debounce_task: asyncio.Task | None = None
-    hold_timeout_task: asyncio.Task | None = None
-    pending_text = ""  # Accumulates incomplete utterances
-    transcript_log: TranscriptLog | None = None
 
-    transfer_number: str | None = None
-
-    async def _debounced_respond(text: str) -> None:
-        """Check turn completeness and fire the response (no debounce delay)."""
-        nonlocal pending_text, response_task, hold_timeout_task
-
-        is_complete = _is_complete_turn(text)
-
-        if not is_complete:
-            pending_text = text
-            logger.info(f"Holding unfinished turn: {text[-80:]}")
-            # Start a hold timeout — flush after N seconds if nothing new arrives
-            if hold_timeout_task and not hold_timeout_task.done():
-                hold_timeout_task.cancel()
-            hold_timeout_task = asyncio.create_task(_flush_after_timeout())
+    def start_reply(text: str | None) -> asyncio.Task:
+        """Start a reply to text, or the greeting when text is None."""
+        if text is None:
+            reply = _stream_agent_response(
+                ws, agent, stream_sid, call_sid, connected, turns.speaking,
+                transcript_log, transfer_number, greeting=True, on_done=turns.greeting_done,
+            )
         else:
-            pending_text = ""
-            if hold_timeout_task and not hold_timeout_task.done():
-                hold_timeout_task.cancel()
-            response_task = asyncio.create_task(
-                _stream_agent_response(
-                    ws, agent, stream_sid, call_sid, connected, speaking, transcript_log,
-                    transfer_number, user_text=text, turn_t0=stt_engine.speech_ended_at
-                )
+            reply = _stream_agent_response(
+                ws, agent, stream_sid, call_sid, connected, turns.speaking,
+                transcript_log, transfer_number, user_text=text, turn_t0=stt_engine.speech_ended_at,
             )
+        return asyncio.create_task(reply)
 
-    async def _flush_after_timeout() -> None:
-        """Flush held text after a timeout in case the speaker is done."""
-        await asyncio.sleep(_HOLD_TIMEOUT_SECONDS)
-        nonlocal pending_text, response_task
-        if pending_text:
-            text = pending_text
-            pending_text = ""
-            logger.info(f"Hold timeout — flushing: {text[-80:]}")
-            response_task = asyncio.create_task(
-                _stream_agent_response(
-                    ws, agent, stream_sid, call_sid, connected, speaking, transcript_log,
-                    transfer_number, user_text=text, turn_t0=stt_engine.speech_ended_at
-                )
-            )
+    turns = TurnTaking(start_reply)
 
     try:
         greeting_sent = False
@@ -391,77 +294,21 @@ async def media_stream(ws: WebSocket):
 
                 if not greeting_sent:
                     greeting_sent = True
-                    response_task = asyncio.create_task(
-                        _stream_agent_response(
-                            ws, agent, stream_sid, call_sid, connected, speaking,
-                            transcript_log, transfer_number, greeting=True,
-                            on_done=greeting_done,
-                        )
-                    )
+                    turns.greet()
 
             elif event == "media":
-                payload = msg["media"]["payload"]
-                pcm = twilio_payload_to_pcm16k(payload)
-
+                pcm = twilio_payload_to_pcm16k(msg["media"]["payload"])
                 await stt_engine.feed_audio(pcm)
 
-                # VAD-level barge-in: cancel as soon as speech is detected,
-                # but not until the greeting has been sent
-                if (
-                    stt_engine.speech_active
-                    and speaking.is_set()
-                    and greeting_done.is_set()
-                    and response_task
-                    and not response_task.done()
-                ):
-                    response_task.cancel()
-                    speaking.clear()
-                    logger.info("Barge-in detected (VAD)")
-
-                # Caller resumed speaking: don't flush held text in the middle of their utterance
-                if stt_engine.speech_active and hold_timeout_task and not hold_timeout_task.done():
-                    hold_timeout_task.cancel()
-
+                turns.on_audio(stt_engine.speech_active)
                 transcript = await stt_engine.get_transcript()
-
                 if transcript:
-                    # Cancel any pending debounce — new speech arrived
-                    if debounce_task and not debounce_task.done():
-                        debounce_task.cancel()
-                    # Cancel hold timeout — new speech resets it
-                    if hold_timeout_task and not hold_timeout_task.done():
-                        hold_timeout_task.cancel()
-
-                    # Accumulate with any held text
-                    combined = (pending_text + " " + transcript).strip() if pending_text else transcript
-                    pending_text = ""
-
-                    # Transcripts arrive at the early silence threshold. Questions and turn-yielding
-                    # phrases respond now; everything else waits for the end of turn below.
-                    if _is_obviously_complete(combined):
-                        debounce_task = asyncio.create_task(_debounced_respond(combined))
-                    else:
-                        pending_text = combined
-
-                if stt_engine.pop_end_of_turn() and pending_text:
-                    text, pending_text = pending_text, ""
-                    debounce_task = asyncio.create_task(_debounced_respond(text))
+                    turns.on_transcript(transcript)
+                if stt_engine.pop_end_of_turn():
+                    turns.on_end_of_turn()
 
             elif event == "stop":
-                # Cancel debounce/timeout and flush any pending text
-                if debounce_task and not debounce_task.done():
-                    debounce_task.cancel()
-                if hold_timeout_task and not hold_timeout_task.done():
-                    hold_timeout_task.cancel()
-                if pending_text and agent:
-                    response_task = asyncio.create_task(
-                        _stream_agent_response(
-                            ws, agent, stream_sid, call_sid, connected, speaking,
-                            transcript_log, transfer_number, user_text=pending_text,
-                            turn_t0=stt_engine.speech_ended_at,
-                        )
-                    )
-                    pending_text = ""
+                turns.on_stop()
                 logger.info("Stream stopped")
                 break
 

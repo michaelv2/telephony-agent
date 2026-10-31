@@ -37,7 +37,7 @@ Ship marks, `clear` and the 250ms gate as one change: `clear` does little withou
 ### Infrastructure
 
 - [ ] **Per-call STT state**: One `WhisperSTT` instance holds the VAD state and buffers for every call, so simultaneous calls collide. Per-call waits need it split; keep the Whisper model shared.
-- [ ] **Whisper decodes on the event loop**: `WhisperModel.transcribe()` returns a lazy generator, so `run_in_executor` only sets it up, and the decoding runs in the `" ".join(...)` on the event loop. For the Whisper time logged each turn (~200ms on base.en), no audio frames are read and no reply audio is sent. Fix: consume the segments inside the executor. It changes timing, so it needs a changelog entry and a bench run.
+- [ ] **Whisper decodes on the event loop**: `WhisperModel.transcribe()` returns a lazy generator, so `run_in_executor` only sets it up, and the decoding runs in the `" ".join(...)` on the event loop. For the Whisper time logged each turn (100-200ms on base.en), no audio frames are read and no reply audio is sent. Fix: consume the segments inside the executor. It changes timing, so it needs a changelog entry and a bench run.
 - [ ] **Let preset env vars override `.env` in `start.sh`**: It sources `.env` after the environment, so `TTS_VOICE=freya ./start.sh phonon` can't change the voice. On 2026-10-27 that took a hand-written launcher.
 
 ## Turn detection improvements

@@ -32,7 +32,9 @@ Optional: `TTS_URL`, `TTS_VOICE` (`af_heart`), `WHISPER_MODEL` (`base.en`), `POR
 
 The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whisper -> Claude (streaming) -> Kokoro TTS -> mulaw 8kHz -> Twilio**.
 
-**`server.py`** — FastAPI app. Four HTTP endpoints (`/call/inbound`, `/call/outbound` for TwiML, `/sms/inbound` to start a call by text, `/api/call` to initiate outbound calls) and one WebSocket endpoint (`/ws/media`) that handles the Twilio Media Stream protocol. Each media event is decoded, fed to STT, and when a transcript is ready, `_stream_agent_response` is fired as an async task.
+**`server.py`** — FastAPI app. Four HTTP endpoints (`/call/inbound`, `/call/outbound` for TwiML, `/sms/inbound` to start a call by text, `/api/call` to initiate outbound calls) and one WebSocket endpoint (`/ws/media`) that handles the Twilio Media Stream protocol. Each media event is decoded and fed to STT, and the STT signals go to `TurnTaking`, which starts and cancels `_stream_agent_response` tasks (Claude -> TTS -> Twilio).
+
+**`turn_taking.py`** — When the agent replies and when caller speech cuts it off. `TurnTaking` holds one call's state: caller phases `LISTENING` / `WAITING` (for end of turn) / `HOLDING` (unfinished text, 1s timeout), plus the current reply and barge-in. It also has the completeness rules (`_is_obviously_complete`, `_is_complete_turn`). No I/O; `test_turn_taking.py` drives it with scripted STT signals.
 
 **`agent.py`** — `CallAgent` uses the async Anthropic client (`AsyncAnthropic`, `client.messages.stream`). Maintains conversation history per call. Splits Claude's streamed text on sentence boundaries (`[.!?]\s+`) and yields each sentence to TTS immediately for low latency.
 
