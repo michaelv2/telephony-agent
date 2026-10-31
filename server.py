@@ -52,7 +52,8 @@ _transfer_numbers: dict[str, str] = {}
 # If held text hasn't been released after this many seconds, flush it anyway.
 _HOLD_TIMEOUT_SECONDS = 1.0
 
-# Patterns that indicate a clearly complete turn — skip LLM classification
+# Phrases that hand the turn back to the agent. Like a question, they reply at the early mark
+# (VAD_EARLY_MS) instead of waiting for the end of turn.
 _COMPLETE_PATTERNS = (
     "what do you think",
     "what's your view",
@@ -322,8 +323,8 @@ async def media_stream(ws: WebSocket):
     call_sid = None
     connected = asyncio.Event()
     connected.set()
-    speaking = asyncio.Event()  # Set while agent TTS is being sent
-    greeting_done = asyncio.Event()  # Set once greeting finishes playing
+    speaking = asyncio.Event()  # Set while a reply is being generated or sent; not while it plays
+    greeting_done = asyncio.Event()  # Set once the greeting has been sent (it may still be playing)
     response_task: asyncio.Task | None = None
     debounce_task: asyncio.Task | None = None
     hold_timeout_task: asyncio.Task | None = None
@@ -340,7 +341,7 @@ async def media_stream(ws: WebSocket):
 
         if not is_complete:
             pending_text = text
-            logger.info(f"LLM: holding incomplete turn: {text[-80:]}")
+            logger.info(f"Holding unfinished turn: {text[-80:]}")
             # Start a hold timeout — flush after N seconds if nothing new arrives
             if hold_timeout_task and not hold_timeout_task.done():
                 hold_timeout_task.cancel()
@@ -405,7 +406,7 @@ async def media_stream(ws: WebSocket):
                 await stt_engine.feed_audio(pcm)
 
                 # VAD-level barge-in: cancel as soon as speech is detected,
-                # but NOT during the greeting (let it play first)
+                # but not until the greeting has been sent
                 if (
                     stt_engine.speech_active
                     and speaking.is_set()
