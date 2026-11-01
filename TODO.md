@@ -6,20 +6,30 @@ Step 1, two-stage end-of-turn detection, is applied on branch `turn-latency` (CH
 
 ### Barge-in (next; doesn't change reply timing)
 
-Ship marks, `clear` and the 250ms gate as one change: `clear` does little without marks, and without the gate a cough cuts the agent off mid-sentence. Do the harness work under **Measure** first. `bench_turn_latency.py` ignores `mark` and `clear` today, so it can't show the fix.
+Ship marks, `clear` and the 250ms gate as one change: `clear` does little without marks, and without the gate a cough cuts the agent off mid-sentence. Measure with `bench_turn_latency.py --barge-in`, which models Twilio's `mark` and `clear`. The baseline is under **Measure**.
 
 - [ ] **Track playback with Twilio `mark` messages**: Keep `speaking` set until the last mark comes back. Today it clears when sending ends, so barge-in stops working while most of the reply is still playing. Phonon sends 5 s of audio in under 1 s.
 - [ ] **Send Twilio `clear` on barge-in**: Discard the queued audio. Today the caller hears every sentence already sent, even after talking over it.
 - [ ] **Require ~250ms of continuous speech before barge-in**: Today a single 32ms VAD frame triggers it. Once `clear` is sent, a cough or "mm-hmm" would cut the agent off. Settle these while building it:
   - **Count speech frames, not `speech_active`**: `speech_active` stays true for up to `VAD_EARLY_MS` (400ms) of silence after any speech, until Whisper runs, so a 32ms cough would pass a "250ms of `speech_active`" check. `WhisperSTT` needs to report how much actual speech it has heard in the current utterance.
-  - **250ms probably won't filter out "mm-hmm"**: It usually runs longer than that. The false-trigger test will show it. If so, check the transcript and ignore short acknowledgements. Related: today a lone "Mm-hmm." counts as unfinished (under 3 words), so the agent replies to it after the 1s hold.
+  - **250ms probably won't filter out "mm-hmm"**: It usually runs longer than that. The false-trigger test will show it. If so, check the transcript and ignore short acknowledgements. Confirmed by the 2026-11-01 baseline: the synthesized "Mm-hmm." is 740ms of speech, Whisper hears it as "Mm.", which counts as unfinished (under 3 words), and the agent replied to it after the 1s hold in 3 of 3 runs. A 160ms blip was once transcribed as "Sorry." and got a reply too, so ignoring short sounds needs a transcript check as well as the gate.
   - **The gate moves the pause boundary earlier**: A cut-off reply gets up to 250ms more to produce audio before it's cancelled. If the pause sweep gets worse, apply the gate only to replies the caller can already hear, and keep cancelling silent ones at the first speech frame.
 - [ ] **Overlapping replies during the greeting**: Barge-in is off during the greeting, so a caller's "Hello?" starts a second reply that sends audio alongside the greeting. Both share one `speaking` flag, so once the greeting finishes, barge-in is also off for the rest of the second reply. Pinned by the `test_quirk_*` tests in `test_turn_taking.py`. Possible fix: hold the caller's text until the greeting has finished playing, which needs the marks.
 - [ ] **Record what the caller actually heard in Claude's history**: Today an interrupted reply leaves nothing in the history, although the caller may have heard a whole sentence.
-- [ ] **Measure**:
-  - Add a harness metric for agent audio played after the caller starts talking. Today that's about a sentence; the target is a few hundred ms.
-  - Add a false-trigger test: a cough and a "mm-hmm" while the agent is speaking.
-  - Re-run the pause sweep to confirm the cut-in boundaries don't move (see the gate's note above).
+- [ ] **Measure** with `bench_turn_latency.py 3 --barge-in --server-log PATH`:
+  - [x] Harness metric: agent audio heard after the caller starts talking ("heard after"). The target is a few hundred ms.
+  - [x] False-trigger cases: a 160ms blip of speech (a stand-in for a cough; Silero misses synthetic coughs at most alignments) and a "mm-hmm", 1.5s into the reply.
+  - Baseline (2026-11-01, Phonon, 3 runs per case):
+
+    | Case | Heard after (median, range) | `clear` sent | Barge-in fired | Agent replied to it |
+    |---|---|---|---|---|
+    | Interrupt 1s in | 5.8s (3.8-9.4s) | 0/3 | 3/3 | 3/3 (expected) |
+    | Interrupt 3s in | 16.6s (11.7-17.0s) | 0/3 | 0/3 (sending had ended) | 3/3 (expected) |
+    | Blip 1.5s in | 10.8s (6.7-16.1s) | 0/3 | 3/3 | 1/3 |
+    | "Mm-hmm" 1.5s in | 11.8s (8.9-13.7s) | 0/3 | 3/3 | 3/3 |
+
+    When barge-in fires today, it drops the sentences not yet sent, but the caller still hears everything already queued at Twilio. So the blip and "mm-hmm" both silently cut their replies short, and an interruption still leaves 4-9s of speech.
+  - [ ] After the fix: re-run `--barge-in`, and the pause sweep to confirm the cut-in boundaries don't move (see the gate's note above).
 
 ### Claude's first sentence (step 2)
 
