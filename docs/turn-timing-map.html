@@ -385,7 +385,6 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
       <li><span><b>An “mm-hmm” costs about a second.</b> The agent stops, waits for the transcript, then repeats the sentence that was playing.</span></li>
       <li><span><b>A “yes” said mid-reply resumes the reply.</b> If the agent asked a question and kept talking, that answer goes unanswered.</span></li>
       <li><span><b>A “Hello?” during the greeting starts a second reply,</b> whose audio queues behind the greeting.</span></li>
-      <li><span><b>Whisper's decoding blocks everything else for 100–200ms each turn.</b> faster-whisper decodes lazily, so the work runs on the event loop instead of the executor. No audio is read or sent meanwhile.</span></li>
       <li><span><b>One STT instance is shared by every call,</b> so two calls at once would mix their VAD state.</span></li>
     </ul>
   </section>

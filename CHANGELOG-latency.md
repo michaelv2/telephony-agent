@@ -488,6 +488,32 @@ Claude then started the recipe over.
 
 ---
 
+### 10. Whisper decodes off the event loop, without temperature retries (2026-11-01)
+
+**Status:** Applied on branch `turn-latency`. Tests in `test_endpointing.py` (`TestDecoding`); both
+fail on the old code.
+
+**What changed:** `stt/whisper_stt.py` consumes faster-whisper's segment generator inside the
+executor, and passes `temperature=0.0`.
+
+**Why:** `transcribe()` returns a lazy generator, so `run_in_executor` only set it up and the
+decoding ran in the `" ".join(...)` on the event loop. While it ran, no audio was read, no reply
+audio was sent, and no timer fired. faster-whisper also retries noisy audio at higher
+temperatures. On the 2026-11-01 13:28 call, half a second of noise took 2,188ms and came out as
+"you", so the whole server stalled for 2.2s.
+
+**What it replaced:** decoding on the event loop, with faster-whisper's default temperature
+schedule (0.0 to 1.0).
+
+**What to watch for if this causes problems:**
+- **Garbled transcripts on noisy calls.** The retries sometimes rescued a bad first decode. Check
+  the transcripts before restoring them.
+- Media messages are still read only after a transcription finishes, because `feed_audio`
+  awaits it, but replies, marks and timers keep running meanwhile.
+- **Rollback:** revert the commit.
+
+---
+
 ## Decision log
 
 | Date       | Decision                            | Rationale                                                     |

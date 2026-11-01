@@ -42,7 +42,7 @@ The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whi
 
 **`tts.py`** — Async HTTP client to the external TTS server. `synthesize_stream` reads PCM from `/tts/stream` and converts each chunk to 20ms mulaw frames as it arrives (CHANGELOG-latency.md, entry 3).
 
-**`stt/`** — Pluggable STT behind `BaseSTT` ABC. `WhisperSTT` uses Silero VAD (512-sample frames at 16kHz) to detect speech boundaries, accumulates audio during speech, transcribes with faster-whisper after 400ms silence (`VAD_EARLY_MS`), and signals end of turn after 800ms (`VAD_SILENCE_MS`); questions respond at the early mark. VAD runs on the event loop. Whisper is handed to an executor, but faster-whisper decodes lazily, so the decoding actually happens on the event loop (TODO.md).
+**`stt/`** — Pluggable STT behind `BaseSTT` ABC. `WhisperSTT` uses Silero VAD (512-sample frames at 16kHz) to detect speech boundaries, accumulates audio during speech, transcribes with faster-whisper after 400ms silence (`VAD_EARLY_MS`), and signals end of turn after 800ms (`VAD_SILENCE_MS`); questions respond at the early mark. VAD runs on the event loop; Whisper's decoding runs in an executor, with `temperature=0.0` (CHANGELOG-latency.md, entry 10).
 
 **`config.py`** — All config from env vars via `python-dotenv`. `get_public_url()` auto-detects ngrok tunnel URL by querying `localhost:4040/api/tunnels`.
 

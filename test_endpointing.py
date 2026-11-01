@@ -7,6 +7,7 @@ full threshold, unless the caller starts speaking again first. VAD and Whisper a
 import asyncio
 import os
 import sys
+import time
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -111,3 +112,44 @@ class TestSpeechMs:
         feed(stt, 0.9, 10)
         feed(stt, 0.0, 12)  # transcribed at the early threshold
         assert not stt.speech_active and stt.speech_ms == 0
+
+
+class TestDecoding:
+    def test_decoding_runs_off_the_event_loop(self):
+        """faster-whisper decodes while its segment generator is consumed; that must not block."""
+        stt = make_stt(early_ms=400)
+
+        def slow_segments():
+            time.sleep(0.2)
+            yield MagicMock(text=" hello there.")
+
+        stt.whisper.transcribe.return_value = (slow_segments(), None)
+
+        async def main():
+            ticks = 0
+
+            async def ticker():
+                nonlocal ticks
+                while True:
+                    await asyncio.sleep(0.01)
+                    ticks += 1
+
+            task = asyncio.create_task(ticker())
+            stt.vad_model.next_prob = 0.9
+            for _ in range(10):
+                await stt.feed_audio(FRAME)
+            stt.vad_model.next_prob = 0.0
+            for _ in range(12):  # transcribed at the early threshold
+                await stt.feed_audio(FRAME)
+            task.cancel()
+            return ticks, await stt.get_transcript()
+
+        ticks, text = asyncio.run(main())
+        assert text == "hello there."
+        assert ticks >= 10  # the loop kept running during the 200 ms decode
+
+    def test_no_temperature_retries(self):
+        stt = make_stt(early_ms=400)
+        feed(stt, 0.9, 10)
+        feed(stt, 0.0, 12)
+        assert stt.whisper.transcribe.call_args.kwargs["temperature"] == 0.0

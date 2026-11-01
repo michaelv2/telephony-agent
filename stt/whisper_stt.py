@@ -111,13 +111,16 @@ class WhisperSTT(BaseSTT):
             / 32768.0
         )
 
-        loop = asyncio.get_event_loop()
+        def decode() -> str:
+            # transcribe() returns a lazy generator and decodes while it's consumed, so consume it
+            # here in the executor; on the event loop it held up everything else. A single
+            # temperature turns off the retries at higher temperatures faster-whisper makes for
+            # noisy audio (2.2s for half a second of noise on the 2026-11-01 call).
+            segments, _ = self.whisper.transcribe(audio, language="en", beam_size=1, temperature=0.0)
+            return " ".join(s.text.strip() for s in segments).strip()
+
         t0 = time.monotonic()
-        segments, _ = await loop.run_in_executor(
-            None,
-            lambda: self.whisper.transcribe(audio, language="en", beam_size=1),
-        )
-        text = " ".join(s.text.strip() for s in segments).strip()
+        text = await asyncio.get_running_loop().run_in_executor(None, decode)
 
         if text:
             done = time.monotonic()
