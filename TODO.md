@@ -44,6 +44,13 @@ Marks, `clear` and the 250ms gate shipped together on 2026-11-01 (CHANGELOG-late
 
 - [ ] **Transcribe while the caller is still speaking**: Step 1 already hides most of Whisper's ~200ms inside the silence wait. The remaining gain is mostly on long utterances, and this is the most complex change. Re-evaluate once steps 1 and 2 are measured.
 
+### Transcription accuracy on short phrases
+
+- [ ] **Find out why short phrases get misheard**: On the 2026-11-01 13:57 call, "is that everything?" came out as "the rear." and, when repeated, "about everything.". The agent asked the caller to repeat, then offered the whole recipe again. Losing the "?" also cost the fast path: both went through the 1s hold, so first audio came 3.8-4.9s after the caller stopped.
+  - **Suspect: the start of the phrase is dropped.** `WhisperSTT.feed_audio` only buffers audio from the first frame Silero scores as speech (`stt/whisper_stt.py:79-88`), with no lead-in. Whisper got 0.80s and 1.09s of audio, about 0.4s and 0.7s of speech after the ~0.38s silence tail, for a phrase that takes about 1s. Both transcripts are missing the start.
+  - **Not reproduced offline:** "Is that everything?" synthesized in 8 voices through the same mulaw path lost only 0-32ms, and `base.en` got it right every time (so did `large-v3` and a 300ms lead-in). Clean TTS isn't a good stand-in for a real voice on a phone line.
+  - **Next:** (1) an env var, off by default, that saves each utterance Whisper hears as a WAV under `logs/` (gitignored; it records the caller's voice, locally only); (2) keep ~300ms of audio from before the first speech frame, which adds no latency since it has already arrived; (3) one test call saying "is that everything?" a few times, then compare on the recordings: how much was clipped, `base.en` with and without the lead-in, and `large-v3` (cached). That says whether the fix is the lead-in, a bigger model, or both. A bigger model costs transcription time, so bench it before switching.
+
 ### Dynamic patience (turn detection)
 
 - [ ] **Adapt the silence wait per caller**: Lengthen it after evidence of mid-thought pauses, for example +300ms after a reply dropped before any audio and +500ms after a heard cut-in, capped at ~2s. Joined transcripts are also evidence. Let it drift back down on clean turns. Log the wait on every turn so changes can still be told apart.
