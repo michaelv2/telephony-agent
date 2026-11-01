@@ -50,6 +50,10 @@ The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whi
 
 `CHANGELOG-latency.md` tracks all changes to the turn-to-turn latency pipeline — VAD thresholds, debounce/turn-detection logic, TTS streaming behavior, and anything else that affects how fast the agent responds after the user stops speaking. Before modifying any of these, read the changelog to understand why the current values exist. After making a change, add an entry recording what changed, why, what it replaced, and what to watch for if it regresses. The goal is to prevent revert loops where we fix a latency issue, forget why, hit a side effect, revert, and end up back where we started.
 
+## Turn Timing Map
+
+`docs/turn-timing-map.html` diagrams one caller turn: when the reply starts, the caller phases in `turn_taking.py`, and when barge-in is armed. It is published at https://claude.ai/artifact/XTV1eBEfKrf1rqEkFGCpmP. Any change that alters turn timing, the phases, a threshold or barge-in updates this page in the same commit, alongside its `CHANGELOG-latency.md` entry. Then republish it with the Artifact tool, passing that URL as `url`. The file is in artifact format: no `<html>` or `<head>`, which the host adds when it publishes.
+
 ## Key Design Decisions
 
 - **Sentence-level streaming**: Claude's response is split on sentence boundaries and each sentence is sent to TTS independently, rather than waiting for the full response. This is the core latency optimization.

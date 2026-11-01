@@ -283,8 +283,8 @@ code first, then passed unchanged after the move.
 
 **Why:** The state was spread across three asyncio Events, three tasks and `pending_text` in
 nested closures in `media_stream`, which made the timing hard to follow. The barge-in work
-(marks, `clear`, 250ms gate) adds more state. The Turn Timing Map diagram uses the same phase
-names.
+(marks, `clear`, 250ms gate) adds more state. The Turn Timing Map (`docs/turn-timing-map.html`) uses the
+same phase names.
 
 **What it replaced:** the `_debounced_respond` and `_flush_after_timeout` closures in
 `media_stream`.

@@ -1,0 +1,391 @@
+<title>Turn Timing Map</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one reading column; figures run wider, laid out like logic-analyzer traces on a time axis. */
+:root {
+  --bg: #f3f5f8;
+  --surface: #ffffff;
+  --fg: #17202b;
+  --muted: #586473;
+  --rule: #d4dbe3;
+  --grid: #e7ebf0;
+  --caller: #1f5fc9;
+  --caller-soft: #dde8fa;
+  --agent: #b55a0b;
+  --agent-soft: #f7e6d5;
+  --ok: #1d7a4e;
+  --ok-soft: #d6eee1;
+  --bad: #c1362c;
+  --bad-soft: #f9e0dd;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10151c; --surface: #171f29; --fg: #e3e8ee; --muted: #9ba7b5; --rule: #2b3543; --grid: #212a35;
+    --caller: #7ea9f4; --caller-soft: #1b2b45; --agent: #f0a356; --agent-soft: #3a2918;
+    --ok: #5fc792; --ok-soft: #15352a; --bad: #f07a6e; --bad-soft: #3f1f1c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10151c; --surface: #171f29; --fg: #e3e8ee; --muted: #9ba7b5; --rule: #2b3543; --grid: #212a35;
+  --caller: #7ea9f4; --caller-soft: #1b2b45; --agent: #f0a356; --agent-soft: #3a2918;
+  --ok: #5fc792; --ok-soft: #15352a; --bad: #f07a6e; --bad-soft: #3f1f1c;
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.6 var(--sans);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+main { max-width: 980px; margin: 0 auto; padding-block: 40px 64px; display: grid; gap: 44px; }
+header { display: grid; gap: 10px; }
+.eyebrow { font: 500 12px var(--mono); color: var(--muted); letter-spacing: .04em; }
+h1, h2 { font-family: var(--display); text-wrap: balance; margin: 0; line-height: 1.15; }
+h1 { font-size: 34px; font-weight: 600; }
+h2 { font-size: 23px; font-weight: 600; }
+p, ul { margin: 0; max-width: 68ch; }
+ul { padding-left: 20px; display: grid; gap: 6px; }
+code { font: 13px var(--mono); background: var(--grid); padding: 1px 5px; border-radius: 4px; }
+section { display: grid; gap: 16px; }
+
+.key { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; color: var(--muted); }
+.key span { display: inline-flex; align-items: center; gap: 8px; }
+.chip { width: 22px; height: 12px; border-radius: 2px; border: 1.5px solid; display: inline-block; }
+.chip.caller { background: var(--caller-soft); border-color: var(--caller); }
+.chip.agent { background: var(--agent-soft); border-color: var(--agent); }
+.chip.ok { background: var(--ok-soft); border-color: var(--ok); }
+.chip.bad { border-color: var(--bad); background: repeating-linear-gradient(45deg, var(--bad-soft) 0 3px, color-mix(in srgb, var(--bad) 45%, var(--bad-soft)) 3px 4.5px); }
+
+figure { margin: 0; display: grid; gap: 10px; }
+.plot { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; overflow-x: auto; }
+.plot svg { display: block; width: 100%; min-width: 760px; height: auto; color: var(--fg); }
+figcaption { font-size: 13.5px; color: var(--muted); max-width: 76ch; }
+
+/* SVG marks, all from tokens */
+.t { fill: var(--fg); font: 12px var(--sans); }
+.t-in { fill: var(--fg); font: 11.5px var(--sans); }
+.t-m { fill: var(--muted); font: 11px var(--sans); }
+.t-num { fill: var(--fg); font: 500 11px var(--mono); }
+.t-axis { fill: var(--muted); font: 11px var(--mono); }
+.t-head { fill: var(--muted); font: 600 10.5px var(--sans); letter-spacing: .08em; }
+.t-node { fill: var(--fg); font: 600 12.5px var(--mono); letter-spacing: .04em; }
+.grid { stroke: var(--grid); stroke-width: 1; }
+.guide { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 4; opacity: .75; }
+.rule { stroke: var(--rule); stroke-width: 1; }
+.wave { fill: none; stroke: var(--caller); stroke-width: 1.5; stroke-linejoin: round; }
+.flat { stroke: var(--muted); stroke-width: 1; }
+.trace { fill: none; stroke: var(--fg); stroke-width: 1.6; }
+.listen { stroke: var(--muted); stroke-width: 2; stroke-dasharray: 0.5 5; stroke-linecap: round; }
+.box-caller { fill: var(--caller-soft); stroke: var(--caller); stroke-width: 1.2; }
+.box-hold { fill: var(--caller-soft); stroke: var(--caller); stroke-width: 1.2; stroke-dasharray: 5 3; }
+.box-agent-soft { fill: var(--agent-soft); stroke: var(--agent); stroke-width: 1.2; }
+.box-agent { fill: var(--agent); }
+.box-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; }
+.box-bad { fill: url(#hatch); stroke: var(--bad); stroke-width: 1.2; }
+.hatch-bg { fill: var(--bad-soft); }
+.hatch-line { stroke: var(--bad); stroke-width: 1.4; opacity: .45; }
+.dot-agent { fill: var(--agent); }
+.diamond { fill: var(--fg); }
+.tick-agent { stroke: var(--agent); stroke-width: 2; }
+.edge { fill: none; stroke: var(--fg); stroke-width: 1.4; }
+.node { fill: var(--surface); stroke: var(--caller); stroke-width: 1.4; }
+.node-reply { fill: var(--agent-soft); stroke: var(--agent); stroke-width: 1.4; }
+.arrowhead { fill: var(--fg); }
+
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 620px; }
+th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font: 600 11px var(--sans); letter-spacing: .07em; text-transform: uppercase; color: var(--muted); background: var(--bg); }
+td.num { font: 13px var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.hit { color: var(--bad); font-weight: 600; }
+.pause td:nth-child(n+2), .pause th:nth-child(n+2) { text-align: center; }
+
+.gaps { list-style: none; padding: 0; display: grid; gap: 10px; }
+.gaps li { display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 12px; max-width: 76ch; }
+.gaps li::before { content: ""; background: var(--bad); border-radius: 2px; }
+.gaps b { font-weight: 600; }
+footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 16px; }
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">telephony-agent · branch turn-latency · 31 Oct 2026</div>
+    <h1>Turn Timing Map</h1>
+    <p>This page follows one caller turn: how the agent decides the caller has finished, when the reply starts, and when the caller can still cut the reply off. Times count from the caller's last word. Phase and function names match <code>turn_taking.py</code>.</p>
+    <div class="key" aria-label="Color key">
+      <span><i class="chip caller"></i>Caller side: listening and deciding</span>
+      <span><i class="chip agent"></i>The agent's reply</span>
+      <span><i class="chip ok"></i>Barge-in armed</span>
+      <span><i class="chip bad"></i>Barge-in not armed</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Deciding the caller has finished</h2>
+    <figure>
+      <div class="plot">
+        <svg viewBox="0 0 960 404" role="img" aria-label="Timeline after the caller's last word. Whisper runs from 400 to about 550 milliseconds of silence and the end of turn comes at 800. A question gets a reply at about 550 milliseconds, a complete statement at 800, and anything else is held for one more second, so its reply starts at 1800.">
+          <text class="t-m" x="16" y="26">ms after the last word</text>
+          <g class="t-axis" text-anchor="middle">
+            <text x="300" y="26">0</text><text x="420" y="26">400</text><text x="540" y="26">800</text>
+            <text x="660" y="26">1200</text><text x="780" y="26">1600</text><text x="900" y="26">2000</text>
+          </g>
+          <line class="grid" x1="660" y1="36" x2="660" y2="396"/>
+          <line class="grid" x1="780" y1="36" x2="780" y2="396"/>
+          <line class="grid" x1="900" y1="36" x2="900" y2="396"/>
+          <line class="guide" x1="300" y1="36" x2="300" y2="396"/>
+          <line class="guide" x1="420" y1="36" x2="420" y2="396"/>
+          <line class="guide" x1="540" y1="36" x2="540" y2="396"/>
+          <line class="guide" x1="840" y1="236" x2="840" y2="396"/>
+
+          <!-- Caller audio -->
+          <text class="t" x="16" y="68">Caller</text>
+          <polyline class="wave" points="180,64 186,56 192,71 198,53 204,74 210,59 216,68 222,50 228,76 234,57 240,70 246,54 252,73 258,60 264,67 270,55 276,72 282,61 288,66 294,62 300,64"/>
+          <line class="flat" x1="300" y1="64" x2="900" y2="64"/>
+          <text class="t-m" x="306" y="56">last word</text>
+
+          <!-- VAD -->
+          <text class="t" x="16" y="116">VAD (Silero)</text>
+          <path class="trace" d="M180 102 H300 V122 H900"/>
+          <text class="t-m" x="240" y="96" text-anchor="middle">speech</text>
+          <text class="t-m" x="720" y="116" text-anchor="middle">silence, counted in 32ms frames</text>
+
+          <!-- Whisper -->
+          <text class="t" x="16" y="164">Whisper</text>
+          <text class="t-m" x="414" y="164" text-anchor="end">at 400ms silence</text>
+          <rect class="box-caller" x="420" y="150" width="45" height="20" rx="3"/>
+          <text class="t-num" x="442.5" y="164" text-anchor="middle">~150ms</text>
+          <text class="t-m" x="473" y="164">transcript ready</text>
+
+          <!-- End of turn -->
+          <text class="t" x="16" y="212">End of turn</text>
+          <polygon class="diamond" points="540,199 549,208 540,217 531,208"/>
+          <text class="t-m" x="556" y="212">at 800ms silence</text>
+
+          <line class="rule" x1="16" y1="234" x2="944" y2="234"/>
+          <text class="t-head" x="16" y="258">WHEN THE REPLY STARTS, BY WHAT THE TRANSCRIPT SAYS</text>
+
+          <!-- Question -->
+          <text class="t" x="16" y="294">A question or hand-off</text>
+          <line class="listen" x1="300" y1="290" x2="465" y2="290"/>
+          <text class="t-m" x="382" y="282" text-anchor="middle">listening</text>
+          <circle class="dot-agent" cx="465" cy="290" r="6"/>
+          <text class="t" x="478" y="294">reply at ~550ms (measured)</text>
+
+          <!-- Complete statement -->
+          <text class="t" x="16" y="340">A complete statement</text>
+          <line class="listen" x1="300" y1="336" x2="465" y2="336"/>
+          <text class="t-m" x="382" y="328" text-anchor="middle">listening</text>
+          <rect class="box-caller" x="465" y="327" width="75" height="18" rx="3"/>
+          <text class="t-in" x="502.5" y="340" text-anchor="middle">waiting</text>
+          <circle class="dot-agent" cx="540" cy="336" r="6"/>
+          <text class="t" x="554" y="340">reply at 800ms (measured)</text>
+
+          <!-- Anything else -->
+          <text class="t" x="16" y="386">Anything else (“…and”)</text>
+          <line class="listen" x1="300" y1="382" x2="465" y2="382"/>
+          <text class="t-m" x="382" y="374" text-anchor="middle">listening</text>
+          <rect class="box-caller" x="465" y="373" width="75" height="18" rx="3"/>
+          <text class="t-in" x="502.5" y="386" text-anchor="middle">waiting</text>
+          <rect class="box-hold" x="540" y="373" width="300" height="18" rx="3"/>
+          <text class="t-in" x="690" y="386" text-anchor="middle">holding: 1s, or until the caller speaks</text>
+          <circle class="dot-agent" cx="840" cy="382" r="6"/>
+          <text class="t" x="852" y="386">reply at 1800ms</text>
+        </svg>
+      </div>
+      <figcaption>Whisper starts at 400ms of silence, while the 800ms end-of-turn wait is still running, so its 100–200ms is hidden inside the wait. A question replies as soon as its transcript is ready. Everything else waits for the end of turn. The 550ms and 800ms figures are medians from the 31 Oct bench; 1800ms is 800ms plus the 1s hold.</figcaption>
+    </figure>
+    <ul>
+      <li><b>A question</b> means a <code>?</code> in the last 60 characters, or a hand-off phrase such as “what do you think” or “go ahead”.</li>
+      <li><b>A complete statement</b> ends in <code>.</code>, <code>!</code> or <code>?</code> and has at least 3 words. Whisper usually punctuates, so most statements qualify.</li>
+      <li><b>Anything else</b> is held: no end punctuation, fewer than 3 words, or a trailing word like “and”, “the” or “because”.</li>
+      <li>Speech between 400 and 800ms is transcribed separately and joined onto the pending text.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>The three caller phases</h2>
+    <figure>
+      <div class="plot">
+        <svg viewBox="0 0 960 310" role="img" aria-label="State diagram. Listening goes to waiting on a transcript that isn't a question. Waiting goes to holding when the end of turn comes and the text looks unfinished. Holding goes back to waiting if the caller speaks again. A reply starts from listening on a question, from waiting at a complete end of turn, and from holding after one second.">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path class="arrowhead" d="M0,0 L10,5 L0,10 z"/>
+            </marker>
+          </defs>
+
+          <rect class="node" x="40" y="90" width="170" height="56" rx="8"/>
+          <text class="t-node" x="125" y="114" text-anchor="middle">LISTENING</text>
+          <text class="t-m" x="125" y="132" text-anchor="middle">nothing pending</text>
+
+          <rect class="node" x="395" y="90" width="170" height="56" rx="8"/>
+          <text class="t-node" x="480" y="114" text-anchor="middle">WAITING</text>
+          <text class="t-m" x="480" y="132" text-anchor="middle">for end of turn (800ms)</text>
+
+          <rect class="node" x="750" y="90" width="170" height="56" rx="8"/>
+          <text class="t-node" x="835" y="114" text-anchor="middle">HOLDING</text>
+          <text class="t-m" x="835" y="132" text-anchor="middle">1s timer running</text>
+
+          <rect class="node-reply" x="395" y="240" width="170" height="56" rx="8"/>
+          <text class="t" x="480" y="263" text-anchor="middle" font-weight="600">Reply starts</text>
+          <text class="t-m" x="480" y="281" text-anchor="middle">Claude → TTS → phone</text>
+
+          <line class="edge" x1="210" y1="118" x2="393" y2="118" marker-end="url(#arr)"/>
+          <text class="t" x="302" y="108" text-anchor="middle">transcript, no question</text>
+
+          <line class="edge" x1="565" y1="118" x2="748" y2="118" marker-end="url(#arr)"/>
+          <text class="t" x="656" y="108" text-anchor="middle">end of turn, unfinished</text>
+
+          <path class="edge" d="M820 90 C820 40, 530 40, 530 88" marker-end="url(#arr)"/>
+          <text class="t" x="675" y="42" text-anchor="middle">caller speaks again</text>
+
+          <path class="edge" d="M420 90 C405 45, 470 45, 456 88" marker-end="url(#arr)"/>
+          <text class="t" x="437" y="42" text-anchor="middle">more speech: joined</text>
+
+          <polyline class="edge" points="125,146 125,268 393,268" marker-end="url(#arr)"/>
+          <text class="t" x="260" y="258" text-anchor="middle">a question or hand-off</text>
+
+          <line class="edge" x1="480" y1="146" x2="480" y2="238" marker-end="url(#arr)"/>
+          <text class="t" x="490" y="186">end of turn, complete,</text>
+          <text class="t" x="490" y="202">or now a question</text>
+
+          <polyline class="edge" points="835,146 835,268 567,268" marker-end="url(#arr)"/>
+          <text class="t" x="700" y="258" text-anchor="middle">1s passes</text>
+        </svg>
+      </div>
+      <figcaption>Starting a reply clears the pending text, so the phase goes back to listening. Each arrow is one method in <code>turn_taking.py</code>: <code>on_transcript</code>, <code>on_end_of_turn</code>, <code>on_audio</code>, or the hold timer. When the call ends, any held text gets a reply, which aborts once the socket closes.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>The reply, and when the caller can cut it off</h2>
+    <figure>
+      <div class="plot">
+        <svg viewBox="0 0 960 320" role="img" aria-label="Timeline of a two-sentence reply. Claude takes about two seconds for the first sentence. Each sentence's audio is sent to Twilio in a short burst, so sending ends near 3.3 seconds while playback runs to about 7 seconds. Today barge-in is armed only until sending ends. After the planned fix it stays armed until playback ends.">
+          <defs>
+            <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <rect class="hatch-bg" width="7" height="7"/>
+              <line class="hatch-line" x1="0" y1="0" x2="0" y2="7"/>
+            </pattern>
+          </defs>
+          <text class="t-m" x="16" y="26">seconds after the reply starts</text>
+          <g class="t-axis" text-anchor="middle">
+            <text x="180" y="26">0</text><text x="270" y="26">1</text><text x="360" y="26">2</text>
+            <text x="450" y="26">3</text><text x="540" y="26">4</text><text x="630" y="26">5</text>
+            <text x="720" y="26">6</text><text x="810" y="26">7</text><text x="900" y="26">8</text>
+          </g>
+          <line class="grid" x1="180" y1="36" x2="180" y2="316"/>
+          <line class="grid" x1="270" y1="36" x2="270" y2="316"/>
+          <line class="grid" x1="360" y1="36" x2="360" y2="316"/>
+          <line class="grid" x1="450" y1="36" x2="450" y2="316"/>
+          <line class="grid" x1="540" y1="36" x2="540" y2="316"/>
+          <line class="grid" x1="630" y1="36" x2="630" y2="316"/>
+          <line class="grid" x1="720" y1="36" x2="720" y2="316"/>
+          <line class="grid" x1="900" y1="36" x2="900" y2="316"/>
+          <line class="guide" x1="477" y1="106" x2="477" y2="270"/>
+          <line class="guide" x1="810" y1="156" x2="810" y2="316"/>
+
+          <text class="t" x="16" y="76">Claude</text>
+          <rect class="box-agent-soft" x="180" y="63" width="270" height="18" rx="3"/>
+          <text class="t-in" x="190" y="76">writes the reply</text>
+          <line class="tick-agent" x1="360" y1="58" x2="360" y2="86"/>
+          <text class="t-m" x="360" y="52" text-anchor="middle">1st sentence ≈ 2s (1.1–4.2s)</text>
+
+          <text class="t" x="16" y="126">Sent to Twilio</text>
+          <rect class="box-agent" x="360" y="113" width="27" height="18" rx="2"/>
+          <rect class="box-agent" x="450" y="113" width="27" height="18" rx="2"/>
+          <text class="t-m" x="487" y="126">a burst per sentence; sending ends here</text>
+
+          <text class="t" x="16" y="176">Plays on the phone</text>
+          <rect class="box-agent-soft" x="360" y="163" width="450" height="18" rx="3"/>
+          <text class="t-in" x="372" y="176">the caller hears it, about 5s</text>
+          <text class="t-m" x="818" y="176">playback ends</text>
+
+          <line class="rule" x1="16" y1="198" x2="944" y2="198"/>
+          <text class="t-head" x="16" y="222">CAN CALLER SPEECH CUT IT OFF?</text>
+
+          <text class="t" x="16" y="258">Today</text>
+          <rect class="box-ok" x="180" y="245" width="297" height="18" rx="3"/>
+          <text class="t-in" x="190" y="258">armed</text>
+          <rect class="box-bad" x="477" y="245" width="333" height="18" rx="3"/>
+          <text class="t-in" x="643" y="258" text-anchor="middle">not armed: talking doesn't stop it</text>
+
+          <text class="t" x="16" y="304">After the fix</text>
+          <rect class="box-ok" x="180" y="291" width="630" height="18" rx="3"/>
+          <text class="t-in" x="190" y="304">armed until playback ends (Twilio marks)</text>
+        </svg>
+      </div>
+      <figcaption>Audio goes to Twilio much faster than it plays (Phonon sends 5s of audio in under 1s), so sending ends long before the caller has heard the reply. Barge-in is tied to sending, so it switches off while most of the reply is still playing. The fix is planned in TODO.md.</figcaption>
+    </figure>
+    <ul>
+      <li><b>What sets it off today:</b> one 32ms VAD frame of speech while a reply is being written or sent, once the greeting has been sent. It cancels the reply task.</li>
+      <li><b>What it doesn't do today:</b> audio already sent stays queued at Twilio and keeps playing, because no <code>clear</code> message is sent.</li>
+      <li><b>The planned fix, shipped together:</b> Twilio <code>mark</code> messages keep barge-in armed until playback ends, <code>clear</code> drops the queued audio, and ~250ms of continuous speech is required so a cough or “mm-hmm” can't cut the agent off.</li>
+      <li><b>During the greeting</b> barge-in is off entirely.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>How long a mid-sentence pause can be</h2>
+    <p>If the caller pauses mid-thought, a reply may start during the pause. When they resume before its first audio arrives, barge-in cancels it and nobody hears it. So a pause is safe while it's shorter than the time from the caller stopping to the reply's first audio: the reply start (about 0.55s after a question, 0.8s after a statement) plus Claude's first sentence and TTS. On 31 Oct that came to about 2.4s at the median, and Claude's spread makes the edge fuzzy.</p>
+    <div class="tablewrap">
+      <table class="pause">
+        <thead><tr><th>Pause</th><th>After a question</th><th>After a statement</th></tr></thead>
+        <tbody>
+          <tr><td class="num">0.5s</td><td class="num">0 of 6</td><td class="num">0 of 6</td></tr>
+          <tr><td class="num">1s</td><td class="num">0 of 6</td><td class="num">0 of 6</td></tr>
+          <tr><td class="num">1.5s</td><td class="num">0 of 6</td><td class="num">0 of 6</td></tr>
+          <tr><td class="num">2s</td><td class="num">0 of 6</td><td class="num hit">2 of 6</td></tr>
+          <tr><td class="num">2.5s</td><td class="num hit">6 of 6</td><td class="num hit">4 of 6</td></tr>
+          <tr><td class="num">3s</td><td class="num hit">6 of 6</td><td class="num hit">6 of 6</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Runs where the agent's audio cut into the pause, out of 6: three sweeps of <code>bench_turn_latency.py --pauses</code> with 2 runs each (27 Oct, and 31 Oct before and after the refactor, which didn't change timing). Anything that makes Claude's first sentence faster moves this edge earlier by the same amount. The 250ms barge-in gate moves it earlier by up to 250ms, because a reply then gets 250ms more to produce audio before it's cancelled.</p>
+  </section>
+
+  <section>
+    <h2>Where each number lives</h2>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>What</th><th>Value</th><th>Set in</th><th>Why it has this value</th></tr></thead>
+        <tbody>
+          <tr><td>Audio frame from Twilio</td><td class="num">20ms</td><td>Twilio Media Streams</td><td>Fixed by Twilio</td></tr>
+          <tr><td>VAD frame</td><td class="num">32ms</td><td><code>stt/whisper_stt.py</code></td><td>Silero needs 512 samples at 16kHz</td></tr>
+          <tr><td>Whisper starts</td><td class="num">400ms silence</td><td><code>VAD_EARLY_MS</code></td><td>Hides Whisper inside the end-of-turn wait (changelog entry 4)</td></tr>
+          <tr><td>End of turn</td><td class="num">800ms silence</td><td><code>VAD_SILENCE_MS</code></td><td>Shorter caught people mid-thought (entries 1, 4)</td></tr>
+          <tr><td>Question or hand-off</td><td class="num">? or phrase</td><td><code>_is_obviously_complete</code></td><td>The clearest end-of-turn signal (entry 4)</td></tr>
+          <tr><td>Complete statement</td><td class="num">. ! ? + 3 words</td><td><code>_is_complete_turn</code></td><td>Local rules replaced a 200–500ms Haiku call (entry 1)</td></tr>
+          <tr><td>Hold for unfinished text</td><td class="num">1s</td><td><code>_HOLD_TIMEOUT_SECONDS</code></td><td>Safety net for the rules, cut from 2s (entry 1)</td></tr>
+          <tr><td>Barge-in trigger</td><td class="num">1 frame</td><td><code>TurnTaking.on_audio</code></td><td>Not tuned yet; 250ms gate planned (TODO.md)</td></tr>
+          <tr><td>Claude's first sentence</td><td class="num">1.1–4.2s</td><td><code>agent.py</code></td><td>Sonnet 5 time to first sentence; the biggest and noisiest stage (entry 4)</td></tr>
+          <tr><td>TTS first audio</td><td class="num">~20ms</td><td><code>tts.py</code></td><td>Streams PCM chunk by chunk (entry 3)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Each “entry” is in <code>CHANGELOG-latency.md</code>. Read it before changing a value.</p>
+  </section>
+
+  <section>
+    <h2>Known gaps</h2>
+    <ul class="gaps">
+      <li><span><b>Barge-in switches off while the reply is still playing.</b> It's tied to sending, not playback. Fix: Twilio marks.</span></li>
+      <li><span><b>Barge-in doesn't stop audio already sent.</b> Fix: send Twilio <code>clear</code>, together with the 250ms gate.</span></li>
+      <li><span><b>A “Hello?” during the greeting starts a second reply</b> that sends audio alongside the greeting. When the greeting finishes it also switches barge-in off for that second reply, because the two share one flag.</span></li>
+      <li><span><b>Whisper's decoding blocks everything else for 100–200ms each turn.</b> faster-whisper decodes lazily, so the work runs on the event loop instead of the executor. No audio is read or sent meanwhile.</span></li>
+      <li><span><b>One STT instance is shared by every call,</b> so two calls at once would mix their VAD state.</span></li>
+    </ul>
+  </section>
+
+  <footer>This page lives at <code>docs/turn-timing-map.html</code> and is updated whenever the turn logic changes. Sources: <code>turn_taking.py</code>, <code>stt/whisper_stt.py</code>, <code>CHANGELOG-latency.md</code> entries 1–4, <code>TODO.md</code>. The quirks above are pinned by the <code>test_quirk_*</code> tests in <code>test_turn_taking.py</code>.</footer>
+</main>
