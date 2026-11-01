@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +19,7 @@ import tts
 from agent import CallAgent
 from audio import twilio_payload_to_pcm16k
 from stt import WhisperSTT
-from turn_taking import Playback, TurnTaking
+from turn_taking import Playback, SpokenReply, TurnTaking
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +73,9 @@ class TranscriptLog:
 
     def agent(self, text: str) -> None:
         self._lines.append(f"[{self._ts()}] Agent: {text}")
+
+    def note(self, text: str) -> None:
+        self._lines.append(f"[{self._ts()}] ({text})")
 
     def save(self) -> None:
         if self._lines:
@@ -261,19 +265,32 @@ async def media_stream(ws: WebSocket):
 
     background: set[asyncio.Task] = set()  # keeps clear tasks referenced until they finish
 
-    def start_reply(text: str | None) -> asyncio.Task:
-        """Start a reply to text, or the greeting when text is None."""
+    def start_reply(text: str | None, spoken: SpokenReply, cut_short: SpokenReply | None) -> asyncio.Task:
+        """Start a reply to text, or the greeting when text is None. If the caller cut the
+        previous reply off, first keep only what they heard of it in Claude's history."""
+        if cut_short is not None and agent is not None:
+            agent.revise_last_reply(cut_short.heard_text)
+            if transcript_log:
+                transcript_log.note(
+                    f"cut off: the caller heard {cut_short.heard} of {len(cut_short.sentences)} sentences"
+                )
         if text is None:
             reply = _stream_agent_response(
-                ws, agent, stream_sid, call_sid, connected, turns.playback,
+                ws, agent, stream_sid, call_sid, connected, turns.playback, spoken,
                 transcript_log, transfer_number, greeting=True, on_done=turns.greeting_sent,
             )
         else:
             reply = _stream_agent_response(
-                ws, agent, stream_sid, call_sid, connected, turns.playback,
+                ws, agent, stream_sid, call_sid, connected, turns.playback, spoken,
                 transcript_log, transfer_number, user_text=text, turn_t0=stt_engine.speech_ended_at,
             )
         return asyncio.create_task(reply)
+
+    def resume_reply(spoken: SpokenReply) -> asyncio.Task:
+        """After an acknowledgement, say the rest of the reply it cut off."""
+        if transcript_log:
+            transcript_log.note(f"resumed from sentence {spoken.heard + 1} of {len(spoken.sentences)}")
+        return asyncio.create_task(_speak_sentences(ws, stream_sid, connected, turns.playback, spoken))
 
     def stop_agent(reply: asyncio.Task | None) -> None:
         """Barge-in: once the cancelled reply has stopped sending, drop the audio queued at Twilio."""
@@ -292,7 +309,7 @@ async def media_stream(ws: WebSocket):
         background.add(task)
         task.add_done_callback(background.discard)
 
-    turns = TurnTaking(start_reply, stop_agent, barge_in_ms=config.BARGE_IN_MS)
+    turns = TurnTaking(start_reply, stop_agent, resume_reply, barge_in_ms=config.BARGE_IN_MS)
 
     try:
         greeting_sent = False
@@ -353,6 +370,7 @@ async def _stream_agent_response(
     call_sid: str | None,
     connected: asyncio.Event,
     playback: Playback,
+    spoken: SpokenReply,
     transcript_log: TranscriptLog | None = None,
     transfer_number: str | None = None,
     user_text: str | None = None,
@@ -362,9 +380,9 @@ async def _stream_agent_response(
 ) -> None:
     """Stream Claude's response sentence-by-sentence through TTS to Twilio.
 
-    After each sentence's audio it sends a Twilio mark from `playback`, which Twilio sends back
-    once the caller has heard that audio. on_done is set when the reply ends. turn_t0 is the
-    time.monotonic() at which the caller stopped speaking, for latency logging.
+    Each sentence is added to `spoken` and sent with a Twilio mark (see _send_sentence). on_done
+    is set when the reply ends. turn_t0 is the time.monotonic() at which the caller stopped
+    speaking, for latency logging.
     """
     should_transfer = False
     started_at = time.monotonic()
@@ -401,33 +419,28 @@ async def _stream_agent_response(
 
             # Stream TTS audio to Twilio as chunks arrive — don't wait for full sentence audio
             if sentence:
-                chunks_before = total_chunks
-                async for chunk in tts.synthesize_stream(sentence):
-                    if not connected.is_set():
-                        logger.info("Connection closed, aborting response")
-                        return
-                    media_msg = {
-                        "event": "media",
-                        "streamSid": stream_sid,
-                        "media": {"payload": chunk},
-                    }
-                    await ws.send_text(json.dumps(media_msg))
-                    total_chunks += 1
-                    if total_chunks == 1 and turn_t0 is not None:
-                        now = time.monotonic()
-                        logger.info(
-                            f"Latency: respond +{(started_at - turn_t0) * 1000:.0f}ms, "
-                            f"first sentence +{(first_sentence_at - turn_t0) * 1000:.0f}ms, "
-                            f"first audio +{(now - turn_t0) * 1000:.0f}ms after end of speech"
-                        )
-                if total_chunks > chunks_before:
-                    # Twilio sends this back once the caller has heard the sentence (TurnTaking.on_mark)
-                    mark = {"event": "mark", "streamSid": stream_sid, "mark": {"name": playback.mark()}}
-                    await ws.send_text(json.dumps(mark))
+                def log_latency() -> None:
+                    now = time.monotonic()
+                    logger.info(
+                        f"Latency: respond +{(started_at - turn_t0) * 1000:.0f}ms, "
+                        f"first sentence +{(first_sentence_at - turn_t0) * 1000:.0f}ms, "
+                        f"first audio +{(now - turn_t0) * 1000:.0f}ms after end of speech"
+                    )
+
+                spoken.sentences.append(sentence)
+                sent = await _send_sentence(
+                    ws, stream_sid, connected, playback, spoken, len(spoken.sentences) - 1,
+                    on_first_audio=log_latency if total_chunks == 0 and turn_t0 is not None else None,
+                )
+                if sent is None:
+                    logger.info("Connection closed, aborting response")
+                    return
+                total_chunks += sent
 
             if should_transfer:
                 break
 
+        spoken.written = True
         if transcript_log and full_response:
             transcript_log.agent(full_response)
 
@@ -453,6 +466,51 @@ async def _stream_agent_response(
     finally:
         if on_done:
             on_done.set()
+
+
+async def _send_sentence(
+    ws: WebSocket,
+    stream_sid: str,
+    connected: asyncio.Event,
+    playback: Playback,
+    spoken: SpokenReply,
+    index: int,
+    on_first_audio: Callable[[], None] | None = None,
+) -> int | None:
+    """Send sentence `index` of `spoken` as TTS audio, then a Twilio mark for it, which Twilio
+    sends back once the caller has heard it (TurnTaking.on_mark). Return the audio chunks sent,
+    or None if the call has ended."""
+    chunks = 0
+    async for chunk in tts.synthesize_stream(spoken.sentences[index]):
+        if not connected.is_set():
+            return None
+        await ws.send_text(json.dumps({"event": "media", "streamSid": stream_sid, "media": {"payload": chunk}}))
+        chunks += 1
+        if chunks == 1 and on_first_audio:
+            on_first_audio()
+    if chunks:
+        mark = {"event": "mark", "streamSid": stream_sid, "mark": {"name": playback.mark(spoken, index)}}
+        await ws.send_text(json.dumps(mark))
+    return chunks
+
+
+async def _speak_sentences(
+    ws: WebSocket, stream_sid: str, connected: asyncio.Event, playback: Playback, spoken: SpokenReply
+) -> None:
+    """Resume a cut-off reply after an acknowledgement: say it again from the first sentence the
+    caller didn't hear in full. No new Claude call; Claude's history already has the reply."""
+    start, chunks = spoken.heard, 0
+    try:
+        for index in range(start, len(spoken.sentences)):
+            sent = await _send_sentence(ws, stream_sid, connected, playback, spoken, index)
+            if sent is None:
+                return
+            chunks += sent
+        logger.info(f"Resumed reply: sentences {start + 1}-{len(spoken.sentences)}, {chunks} audio chunks")
+    except asyncio.CancelledError:
+        logger.info(f"Resumed reply cancelled (barge-in) after {chunks} audio chunks")
+    except Exception:
+        logger.exception("Error resuming reply")
 
 
 async def _execute_transfer(call_sid: str, transfer_to: str) -> None:

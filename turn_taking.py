@@ -17,14 +17,17 @@ Caller side, one of three phases (TurnTaking.phase):
 Agent side: the agent is talking while a reply is being written or sent, and until Twilio says
 its audio has finished playing (Playback). Once the caller has spoken for _BARGE_IN_MS while it
 talks, the agent stops: the reply is cancelled and the audio queued at Twilio is cleared
-(barge-in). Shorter sounds, like a cough, don't stop it, and their transcript gets no reply. The
-greeting can't be cut off until it has finished playing.
+(barge-in). Shorter sounds, like a cough, don't stop it, and their transcript gets no reply. If
+the speech that stopped it turns out to be an acknowledgement ("mm-hmm", "okay"), the reply picks
+up again from the sentence the caller was hearing. Otherwise Claude's history keeps only the
+sentences the caller heard. The greeting can't be cut off until it has finished playing.
 
 CHANGELOG-latency.md records why each threshold has its current value.
 """
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from enum import Enum
 
@@ -102,32 +105,71 @@ def _is_complete_turn(text: str) -> bool:
     return False
 
 
+# Words a caller says to show they're listening rather than to take the turn. A transcript made
+# only of these, after it cut the agent off mid-reply, resumes the reply instead of getting one.
+_ACKNOWLEDGEMENTS = frozenset(
+    "mm mmm mmhmm mhm hmm hm uh uhhuh huh okay ok yeah yep yup yes right sure alright gotcha "
+    "got it i see go on ahead".split()
+)
+
+
+def _is_acknowledgement(text: str) -> bool:
+    words = re.sub(r"[^a-z ]", " ", text.lower().replace("-", "")).split()
+    return 0 < len(words) <= 4 and all(w in _ACKNOWLEDGEMENTS for w in words)
+
+
 class Phase(Enum):
     LISTENING = "listening"
     WAITING = "waiting for end of turn"
     HOLDING = "holding"
 
 
+class SpokenReply:
+    """One reply's sentences, and how many of them the caller has heard in full."""
+
+    def __init__(self):
+        self.sentences: list[str] = []  # As spoken (tags stripped), in order
+        self.heard = 0  # The first `heard` sentences have finished playing
+        self.written = False  # The reply ran to the end: no more sentences are coming
+        self.cut_off = False  # Barge-in stopped it
+
+    @property
+    def unheard(self) -> list[str]:
+        return self.sentences[self.heard:]
+
+    @property
+    def heard_text(self) -> str:
+        return " ".join(self.sentences[: self.heard])
+
+    @property
+    def cut_short(self) -> bool:
+        """It was cut off before the caller heard all of it, so Claude's history needs fixing."""
+        return self.cut_off and (self.heard < len(self.sentences) or not self.written)
+
+
 class Playback:
     """Audio queued at Twilio that the caller hasn't heard yet, tracked with Twilio marks.
 
-    A reply sends a mark after each sentence's audio. Twilio sends it back once that audio has
-    played, or straight away after a `clear`.
+    A reply sends a mark after each sentence's audio. Twilio sends it back once that sentence has
+    played, or straight away after a `clear` (by then the mark is forgotten, so it doesn't count).
     """
 
     def __init__(self):
-        self._pending: set[str] = set()
+        self._pending: dict[str, tuple[SpokenReply, int]] = {}
         self._count = 0
 
-    def mark(self) -> str:
-        """Name a new mark, for the reply to send after the audio it has just queued."""
+    def mark(self, spoken: SpokenReply, index: int) -> str:
+        """Name a new mark for sentence `index` of `spoken`, to send after its audio."""
         name = f"m{self._count}"
         self._count += 1
-        self._pending.add(name)
+        self._pending[name] = (spoken, index)
         return name
 
     def on_mark(self, name: str) -> None:
-        self._pending.discard(name)
+        entry = self._pending.pop(name, None)
+        if entry is not None:
+            spoken, index = entry
+            spoken.heard = max(spoken.heard, index + 1)
 
     def clear(self) -> None:
         self._pending.clear()
@@ -145,29 +187,37 @@ class TurnTaking:
 
     def __init__(
         self,
-        start_reply: Callable[[str | None], asyncio.Task],
+        start_reply: Callable[[str | None, SpokenReply, SpokenReply | None], asyncio.Task],
         stop_agent: Callable[[asyncio.Task | None], None],
+        resume_reply: Callable[[SpokenReply], asyncio.Task] | None = None,
         barge_in_ms: int | None = None,
     ):
-        """start_reply(text) starts a reply to text, or the greeting when text is None, and
-        returns its task. A reply marks its audio with `playback`, and the greeting sets
-        `greeting_sent` when it has sent all of its audio.
+        """start_reply(text, spoken, cut_short) starts a reply to text, or the greeting when text
+        is None, and returns its task. The reply adds each sentence to `spoken` as it says it and
+        marks its audio with `playback`. The greeting sets `greeting_sent` when it has sent all of
+        its audio. cut_short, when set, is the previous reply: the caller cut it off, so Claude's
+        history should keep only its heard_text.
 
         stop_agent(reply) is called on barge-in, after the reply (if still running) has been
         cancelled. It must clear the audio queued at Twilio once the reply has stopped sending.
+
+        resume_reply(spoken) speaks spoken.unheard after an acknowledgement, and returns its task.
         """
         self._start_reply = start_reply
         self._stop_agent = stop_agent
+        self._resume_reply = resume_reply
         self._hold_timeout_s = _HOLD_TIMEOUT_SECONDS
         self._barge_in_ms = _BARGE_IN_MS if barge_in_ms is None else barge_in_ms
         self.playback = Playback()
         self.greeting_sent = asyncio.Event()  # The greeting's audio has all been sent
         self._greeting_played = False  # ...and has finished playing
         self.pending = ""  # Caller text not replied to yet
-        self._reply: asyncio.Task | None = None  # The most recent reply
+        self.last_spoken: SpokenReply | None = None  # The most recent reply's sentences
+        self._reply: asyncio.Task | None = None  # The most recent reply, or a resume of it
         self._hold: asyncio.Task | None = None  # The hold timer, while HOLDING
         self._in_speech = False  # Between an utterance's first speech frame and its transcript
         self._ignore_utterance = False  # It began while the agent talked, and hasn't barged in
+        self._cut_by_utterance: SpokenReply | None = None  # The reply this utterance cut off
 
     @property
     def phase(self) -> Phase:
@@ -176,9 +226,13 @@ class TurnTaking:
         return Phase.WAITING if self.pending else Phase.LISTENING
 
     @property
+    def _reply_running(self) -> bool:
+        return self._reply is not None and not self._reply.done()
+
+    @property
     def agent_talking(self) -> bool:
         """A reply is being written or sent, or the caller is still hearing its audio."""
-        return (self._reply is not None and not self._reply.done()) or self.playback.playing
+        return self._reply_running or self.playback.playing
 
     @property
     def greeting_done(self) -> bool:
@@ -189,13 +243,14 @@ class TurnTaking:
 
     def greet(self) -> None:
         """Start the greeting. Caller speech can't cut it off."""
-        self._reply = self._start_reply(None)
+        self.last_spoken = SpokenReply()
+        self._reply = self._start_reply(None, self.last_spoken, None)
 
     def on_mark(self, name: str) -> None:
         """Twilio has played the audio sent before this mark."""
         was_playing = self.playback.playing
         self.playback.on_mark(name)
-        if was_playing and not self.playback.playing:
+        if was_playing and not self.playback.playing and not self._reply_running:
             logger.info("Playback finished: the caller has heard all the audio sent")
 
     def on_audio(self, speech_active: bool, speech_ms: int = 0) -> None:
@@ -207,6 +262,7 @@ class TurnTaking:
         if not self._in_speech:  # The utterance's first speech frame
             self._in_speech = True
             self._ignore_utterance = self.greeting_done and self.agent_talking
+            self._cut_by_utterance = None
         if self.greeting_done and self.agent_talking and speech_ms >= self._barge_in_ms:
             self._barge_in(speech_ms)
         # HOLDING -> WAITING: don't flush held text in the middle of the caller's next utterance.
@@ -218,6 +274,9 @@ class TurnTaking:
             reply.cancel()
         self.playback.clear()
         self._ignore_utterance = False
+        if self.last_spoken is not None:
+            self.last_spoken.cut_off = True
+        self._cut_by_utterance = self.last_spoken
         logger.info(f"Barge-in detected (VAD, {speech_ms}ms of speech)")
         self._stop_agent(reply)
 
@@ -228,6 +287,15 @@ class TurnTaking:
             # behind the audio still playing.
             self._ignore_utterance = False
             logger.info(f"Ignoring {text[-80:]!r}: said while the agent talked, too short to stop it")
+            return
+        cut, self._cut_by_utterance = self._cut_by_utterance, None
+        if cut is not None and cut.unheard and self._resume_reply and _is_acknowledgement(text):
+            # The caller was only showing they're listening: carry on from the sentence they
+            # were hearing instead of answering it.
+            logger.info(
+                f"Resuming after {text!r}: from sentence {cut.heard + 1} of {len(cut.sentences)}"
+            )
+            self._reply = self._resume_reply(cut)
             return
         self._cancel_hold()
         combined = (self.pending + " " + text).strip() if self.pending else text
@@ -256,7 +324,10 @@ class TurnTaking:
 
     def _reply_to(self, text: str) -> None:
         self._cancel_hold()
-        self._reply = self._start_reply(text)
+        last = self.last_spoken
+        cut_short = last if last is not None and last.cut_short else None
+        self.last_spoken = SpokenReply()
+        self._reply = self._start_reply(text, self.last_spoken, cut_short)
 
     def _take_pending(self) -> str:
         text, self.pending = self.pending, ""

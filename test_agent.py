@@ -176,3 +176,32 @@ async def test_client_is_async():
         f"Expected AsyncAnthropic, got {type(client).__name__}. "
         "The sync client blocks the event loop during streaming."
     )
+
+
+def _agent_with(*messages):
+    from agent import CallAgent
+    agent = CallAgent()
+    agent.messages = [{"role": r, "content": c} for r, c in messages]
+    return agent
+
+
+def test_revise_last_reply_keeps_what_the_caller_heard():
+    agent = _agent_with(("user", "Recipe?"), ("assistant", "Step one. Step two. Step three."))
+    agent.revise_last_reply("Step one.")
+    assert agent.messages[-1] == {"role": "assistant", "content": "Step one."}
+
+
+def test_revise_last_reply_drops_a_reply_nobody_heard():
+    agent = _agent_with(("user", "Recipe?"), ("assistant", "Step one. Step two."))
+    agent.revise_last_reply("")
+    assert agent.messages == [{"role": "user", "content": "Recipe?"}]
+
+
+def test_revise_last_reply_adds_a_reply_cut_off_while_being_written():
+    # Cancelled mid-stream, respond_stream never added the assistant message.
+    agent = _agent_with(("user", "Recipe?"))
+    agent.revise_last_reply("Step one.")
+    assert agent.messages[-1] == {"role": "assistant", "content": "Step one."}
+    agent2 = _agent_with(("user", "Recipe?"))
+    agent2.revise_last_reply("")
+    assert agent2.messages == [{"role": "user", "content": "Recipe?"}]

@@ -330,7 +330,9 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
     <ul>
       <li><b>What sets it off:</b> 250ms of speech (<code>BARGE_IN_MS</code>) while the agent is talking: writing a reply, sending it, or still playing it.</li>
       <li><b>What it does:</b> cancels the reply, then sends Twilio <code>clear</code>, which drops the audio queued for the phone. The caller hears about 300ms of the agent after starting to talk; before 1 Nov it was 6–17s.</li>
-      <li><b>Shorter sounds don't stop it:</b> a cough or click under 250ms is ignored, and its transcript gets no reply. An “mm-hmm” is longer, so it still stops the agent.</li>
+      <li><b>Shorter sounds don't stop it:</b> a cough or click under 250ms is ignored, and its transcript gets no reply.</li>
+      <li><b>Acknowledgements resume the reply:</b> an “mm-hmm” or “okay” is longer than 250ms, so it stops the agent. About 1s later, once its transcript shows it was only an acknowledgement, the reply picks up from the start of the sentence the caller was hearing.</li>
+      <li><b>Claude's history keeps what the caller heard:</b> after a real interruption, only the sentences that finished playing stay in the history.</li>
       <li><b>During the greeting</b> barge-in is off until the greeting has finished playing.</li>
     </ul>
   </section>
@@ -367,7 +369,8 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
           <tr><td>Question or hand-off</td><td class="num">? or phrase</td><td><code>_is_obviously_complete</code></td><td>The clearest end-of-turn signal (entry 4)</td></tr>
           <tr><td>Complete statement</td><td class="num">. ! ? + 3 words</td><td><code>_is_complete_turn</code></td><td>Local rules replaced a 200–500ms Haiku call (entry 1)</td></tr>
           <tr><td>Hold for unfinished text</td><td class="num">1s</td><td><code>_HOLD_TIMEOUT_SECONDS</code></td><td>Safety net for the rules, cut from 2s (entry 1)</td></tr>
-          <tr><td>Barge-in trigger</td><td class="num">250ms of speech</td><td><code>BARGE_IN_MS</code></td><td>Longer than a cough; an “mm-hmm” still passes (entry 7)</td></tr>
+          <tr><td>Barge-in trigger</td><td class="num">250ms of speech</td><td><code>BARGE_IN_MS</code></td><td>Longer than a cough, short enough for “stop” (entries 7, 8)</td></tr>
+          <tr><td>Acknowledgement</td><td class="num">≤ 4 words</td><td><code>_is_acknowledgement</code></td><td>“mm-hmm”, “okay”, “yeah”… after a cut-off: resume (entry 8)</td></tr>
           <tr><td>Claude's first sentence</td><td class="num">1.1–4.2s</td><td><code>agent.py</code></td><td>Sonnet 5 time to first sentence; the biggest and noisiest stage (entry 4)</td></tr>
           <tr><td>TTS first audio</td><td class="num">~20ms</td><td><code>tts.py</code></td><td>Streams PCM chunk by chunk (entry 3)</td></tr>
         </tbody>
@@ -379,9 +382,9 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
   <section>
     <h2>Known gaps</h2>
     <ul class="gaps">
-      <li><span><b>An “mm-hmm” or “okay” stops the agent,</b> because it's longer than 250ms, and the agent then answers it after the 1s hold.</span></li>
+      <li><span><b>An “mm-hmm” costs about a second.</b> The agent stops, waits for the transcript, then repeats the sentence that was playing.</span></li>
+      <li><span><b>A “yes” said mid-reply resumes the reply.</b> If the agent asked a question and kept talking, that answer goes unanswered.</span></li>
       <li><span><b>A “Hello?” during the greeting starts a second reply,</b> whose audio queues behind the greeting.</span></li>
-      <li><span><b>A cut-off reply leaves nothing in Claude's history,</b> although the caller may have heard part of it.</span></li>
       <li><span><b>Whisper's decoding blocks everything else for 100–200ms each turn.</b> faster-whisper decodes lazily, so the work runs on the event loop instead of the executor. No audio is read or sent meanwhile.</span></li>
       <li><span><b>One STT instance is shared by every call,</b> so two calls at once would mix their VAD state.</span></li>
     </ul>

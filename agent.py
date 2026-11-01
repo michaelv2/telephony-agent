@@ -63,6 +63,22 @@ class CallAgent:
         self.messages.append({"role": "assistant", "content": full_response})
         logger.info(f"Agent: {full_response}")
 
+    def revise_last_reply(self, heard: str) -> None:
+        """The caller cut the last reply off: keep only the part they heard in the history.
+
+        If the reply was still being written when it was cut, its assistant message was never
+        added, so `heard` is added instead (when there is any). Consecutive user messages are fine:
+        the API combines them.
+        """
+        if self.messages and self.messages[-1]["role"] == "assistant":
+            if heard:
+                self.messages[-1]["content"] = heard
+            else:
+                self.messages.pop()
+        elif heard:
+            self.messages.append({"role": "assistant", "content": heard})
+        logger.info(f"Agent (as heard): {heard or '(nothing)'}")
+
     async def greeting_stream(self) -> AsyncGenerator[str, None]:
         """Stream an initial greeting."""
         if self._has_context:

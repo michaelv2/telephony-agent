@@ -408,6 +408,60 @@ before the `clear`, where it used to cost a whole sentence or more.
 
 ---
 
+### 8. Acknowledgements resume the reply; history keeps what was heard (2026-11-01)
+
+**Status:** Applied on branch `turn-latency`. Tests in `test_turn_taking.py` (44 cases, 22 of them
+acknowledgement checks) and `test_agent.py`. Measured with `bench_turn_latency.py --barge-in`.
+
+**What changed:**
+- `turn_taking.py`: each reply records its sentences in a `SpokenReply`, and each Twilio mark
+  says which sentence it follows, so `heard` counts the sentences the caller has heard in full.
+  If the speech that stopped the agent turns out to be an acknowledgement, the reply carries on
+  from the first sentence the caller didn't hear in full instead of being answered.
+  `_is_acknowledgement` accepts at most four words, all from a short list ("mm-hmm", "okay",
+  "yeah", "uh-huh", "right", "got it" and so on). This only applies when the agent was cut off
+  mid-reply: an "Okay." after it has finished is still answered.
+- `server.py`: `_speak_sentences` resumes from the stored sentences, with no new Claude call.
+  Before the next Claude reply, `start_reply` calls `CallAgent.revise_last_reply`, so Claude's
+  history keeps only the sentences the caller heard of a cut-off reply. The transcript file notes
+  each cut and resume.
+- `Playback finished` is only logged once the reply has ended.
+
+**Why:** On the 2026-11-01 live call (12:57), three of the four barge-ins were "Okay." or
+"Mm-hmm.". Each cut the recipe off, the agent answered the acknowledgement ("Anything else I can
+help with?"), and the rest of the recipe was lost. Raising `BARGE_IN_MS` instead was rejected:
+the caller's acknowledgements were about 0.4s of speech, as short as "stop" or "wait". Speech that
+doesn't stop the agent gets no reply, so a higher threshold would make a quick "stop" do nothing.
+Claude's history was also wrong. A long reply is sent in a few seconds, so it was saved in full,
+and Claude thought the cut-off recipe had been delivered.
+
+**What it replaced:** every barge-in was answered as a new turn, and the history kept whatever
+Claude had written.
+
+**Measured** (2026-11-01, Phonon, 3 runs per case):
+
+| Case | Heard after | Barge-in fired | Resumed | Answered |
+|---|---|---|---|---|
+| Interrupt 1s into the reply | 0.30s | 3/3 | 0/3 | 3/3 (expected) |
+| Interrupt 3s into the reply | 0.30s | 3/3 | 0/3 | 3/3 (expected) |
+| 160ms blip, 1.5s in | carries on | 0/3 | 0/3 | 0/3 |
+| "Mm-hmm", 1.5s in | 0.28s, then resumes | 3/3 | 3/3 | 0/3 (was 3/3) |
+
+The resumes started from sentence 2 of 4, 2 of 3 and 1 of 2. A resume starts about 1s after the
+cut: the rest of the "mm-hmm", Whisper about 0.4s later, then TTS (about 20ms).
+
+**What to watch for if this causes problems:**
+- **The agent repeats a sentence after "mm-hmm".** That's intended: it restarts the sentence that
+  was playing.
+- **An answer is treated as an acknowledgement.** "Yes" or "okay" said while the agent is
+  mid-reply resumes the reply instead of answering. If the agent asks a question and keeps
+  talking, a "yes" goes unanswered. Change `_ACKNOWLEDGEMENTS` if a word causes trouble.
+- **A resume stops short.** It only replays sentences that were already written. A reply cut off
+  in its first second or two, before Claude had finished, resumes only what was written.
+- **Rollback:** revert the commit.
+
+---
+
 ## Decision log
 
 | Date       | Decision                            | Rationale                                                     |
@@ -421,3 +475,4 @@ before the `clear`, where it used to cost a whole sentence or more.
 | 2026-10-31 | Turn-taking state in one class, no timing change | Hard to follow across closures; barge-in work adds state |
 | 2026-11-01 | Phonon as the default TTS | All latency measurements since 2026-10-27 used it |
 | 2026-11-01 | Barge-in tracks playback, 250ms gate, `clear` | Replies stacked up to 37s behind on a live call |
+| 2026-11-01 | Resume after acknowledgements, not a higher gate | A higher gate would ignore "stop" and "wait" |

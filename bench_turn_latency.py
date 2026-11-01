@@ -31,8 +31,10 @@ Measured for each, from the caller's side:
                For an interruption, less is better. After a blip or "mm-hmm" the reply should
                carry on, so this should be the rest of the reply.
   clear        the agent sent Twilio `clear`
-  new reply    the agent started another reply after the sound (expected for an interruption)
-With --server-log PATH, it also counts the server's "Barge-in detected" lines for each case.
+  new reply    audio arrived after the sound: an answer (expected for an interruption) or, after
+               an acknowledgement, the cut-off reply resuming
+With --server-log PATH, it also counts the server's "Barge-in detected" and "Resuming after" lines
+for each case.
 
 usage: .venv/bin/python bench_turn_latency.py [runs=3] [--voice NAME] [--url ws://localhost:9002/ws/media]
        .venv/bin/python bench_turn_latency.py [runs=2] --pauses 0.5,1,1.5,2,2.5,3
@@ -341,10 +343,11 @@ def pause_sweep(args, pauses: list[float]) -> None:
         print(f"| {p:g} s | " + " | ".join(cells) + " |")
 
 
-def barge_ins_logged(log: str, start: float, end: float) -> int:
-    """Count the server's "Barge-in detected" lines between two wall-clock times (1 s resolution)."""
+def logged(log: str, what: str, start: float, end: float) -> int:
+    """Count server log lines starting with `what` between two wall-clock times (1 s resolution)."""
     lo, hi = (time.strftime("%H:%M:%S", time.localtime(t)) for t in (start - 1, end + 1))
-    return sum(lo <= m[1] <= hi for m in re.finditer(r"^(\d\d:\d\d:\d\d) \[\w+\] Barge-in detected", log, re.M))
+    pattern = rf"^(\d\d:\d\d:\d\d) \[\w+\] {re.escape(what)}"
+    return sum(lo <= m[1] <= hi for m in re.finditer(pattern, log, re.M))
 
 
 def barge_in_sweep(args) -> None:
@@ -363,15 +366,18 @@ def barge_in_sweep(args) -> None:
         results += run
 
     log = Path(args.server_log).read_text() if args.server_log else None
-    print("\n| case | n | heard after (median, range) | clear sent | barge-in fired | new reply |")
-    print("|---|---|---|---|---|---|")
+    print("\n| case | n | heard after (median, range) | clear sent | barge-in fired | resumed | new reply |")
+    print("|---|---|---|---|---|---|---|")
     for kind, offset in BARGE_CASES:
         ok = [res for k, o, res in results if (k, o) == (kind, offset) and res["heard"] is not None]
         heard = [res["heard"] * 1000 for res in ok]
         cell = f"{statistics.median(heard):.0f} ms ({min(heard):.0f}-{max(heard):.0f})" if heard else "-"
-        fired = f"{sum(barge_ins_logged(log, *res['window']) > 0 for res in ok)}/{len(ok)}" if log else "-"
+
+        def count(what: str) -> str:
+            return f"{sum(logged(log, what, *res['window']) > 0 for res in ok)}/{len(ok)}" if log else "-"
+
         print(f"| {kind} @{offset:g}s | {len(ok)} | {cell} | {sum(res['clear'] for res in ok)}/{len(ok)} "
-              f"| {fired} | {sum(res['new_reply'] for res in ok)}/{len(ok)} |")
+              f"| {count('Barge-in detected')} | {count('Resuming after')} | {sum(res['new_reply'] for res in ok)}/{len(ok)} |")
     skipped = sum(res["heard"] is None for _, _, res in results)
     if skipped:
         print(f"\n{skipped} case(s) skipped: no reply came, or it had finished playing before the sound")

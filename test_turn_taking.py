@@ -8,13 +8,16 @@ fake STT:
   "text:<...>"   Whisper's transcript arrives (in production: after VAD_EARLY_MS of silence),
                  which ends the utterance
   "eot"          end of turn (in production: after VAD_SILENCE_MS of silence)
-A played("m1") message is Twilio sending back mark m1: the caller has heard that audio. Each fake
-reply sends one mark when it finishes sending (the greeting's is m0, then m1, m2, ...).
+A played("m1") message is Twilio sending back mark m1: the caller has heard that sentence. The
+fake greeting says one sentence (mark m0). Each fake reply says three, "<text> s1" to "<text> s3",
+and marks them when it finishes sending (m1-m3 for the first reply, and so on).
 
 Each test checks the log of what the agent did: ("reply", text) when a reply starts, ("done", text)
 when it finishes sending, ("cancelled", text) on barge-in, and ("clear",) when it tells Twilio to
-drop the queued audio. ("note", ...) entries mark points in the script, so a test can tell what
-happened before and after them.
+drop the queued audio. ("resume", sentence) is a cut-off reply carrying on from that sentence, and
+("history", heard) is Claude's history keeping only what the caller heard of a cut-off reply.
+("note", ...) entries mark points in the script, so a test can tell what happened before and
+after them.
 """
 
 import asyncio
@@ -153,6 +156,9 @@ class FakeTranscriptLog:
     def agent(self, *a):
         pass
 
+    def note(self, *a):
+        pass
+
     def save(self):
         pass
 
@@ -161,14 +167,17 @@ def run_call(monkeypatch, script: list, greeting_s: float = GREETING_S) -> list:
     """Run one scripted call through server.media_stream and return the event log."""
     log: list = []
 
-    async def fake_reply(ws, agent, stream_sid, call_sid, connected, playback,
+    async def fake_reply(ws, agent, stream_sid, call_sid, connected, playback, spoken,
                          transcript_log=None, transfer_number=None, user_text=None,
                          greeting=False, on_done=None, turn_t0=None):
         label = "greeting" if greeting else user_text
         log.append(("reply", label))
         try:
             await asyncio.sleep(greeting_s if greeting else REPLY_S)
-            playback.mark()  # sent after its audio; comes back via played(...)
+            for i in range(1 if greeting else 3):
+                spoken.sentences.append(f"{label} s{i + 1}")
+                playback.mark(spoken, i)  # sent after its audio; comes back via played(...)
+            spoken.written = True
             log.append(("done", label))
         except asyncio.CancelledError:
             log.append(("cancelled", label))
@@ -176,10 +185,23 @@ def run_call(monkeypatch, script: list, greeting_s: float = GREETING_S) -> list:
             if on_done:
                 on_done.set()
 
+    async def fake_speak(ws, stream_sid, connected, playback, spoken):
+        log.append(("resume", spoken.unheard[0]))
+        for i in range(spoken.heard, len(spoken.sentences)):
+            playback.mark(spoken, i)
+
+    class FakeAgent:
+        def __init__(self, context=None):
+            pass
+
+        def revise_last_reply(self, heard):
+            log.append(("history", heard))
+
     monkeypatch.setattr(server, "stt_engine", FakeSTT())
     monkeypatch.setattr(server, "_stream_agent_response", fake_reply)
     monkeypatch.setattr(server, "twilio_payload_to_pcm16k", lambda payload: payload)
-    monkeypatch.setattr(server, "CallAgent", lambda context=None: object())
+    monkeypatch.setattr(server, "_speak_sentences", fake_speak)
+    monkeypatch.setattr(server, "CallAgent", FakeAgent)
     monkeypatch.setattr(server, "TranscriptLog", FakeTranscriptLog)
     monkeypatch.setattr(turn_taking, "_HOLD_TIMEOUT_SECONDS", HOLD_S)
 
@@ -324,13 +346,15 @@ def test_speech_while_reply_still_plays_clears_it(monkeypatch):
         ("done", "Do you have Tuesday?"),
         ("note", "sent, still playing"),
         ("clear",),
+        ("history", ""),  # the caller heard none of it
         ("reply", "Actually, what about Wednesday?"),
     ]
 
 
 def test_speech_after_reply_has_played_is_a_new_turn(monkeypatch):
     log = run_call(monkeypatch, GREETED + [
-        SPEECH, text("Do you have Tuesday?"), Wait(REPLY_S + 0.05), played("m1"),
+        SPEECH, text("Do you have Tuesday?"), Wait(REPLY_S + 0.05),
+        played("m1"), played("m2"), played("m3"),
         *BLIP, text("And Wednesday?"), Wait(0.03),
     ])
     assert log == GREETING_LOG + [
@@ -363,6 +387,98 @@ def test_reply_overlapping_greeting_can_be_stopped_once_greeting_has_played(monk
     ]
 
 
+# --- Acknowledgements and what the caller heard ---
+
+
+def test_acknowledgement_resumes_from_the_sentence_playing(monkeypatch):
+    log = run_call(monkeypatch, GREETED + [
+        SPEECH, text("Can you give me the recipe?"), Wait(REPLY_S + 0.05), played("m1"),
+        Note("heard sentence 1"), *TALK, text("Mm hmm."), EOT, Wait(HOLD_S + 0.05),
+    ])
+    assert log == GREETING_LOG + [
+        ("reply", "Can you give me the recipe?"),
+        ("done", "Can you give me the recipe?"),
+        ("note", "heard sentence 1"),
+        ("clear",),
+        ("resume", "Can you give me the recipe? s2"),  # and no reply to "Mm hmm."
+    ]
+
+
+def test_resumed_reply_heard_to_the_end_leaves_history_alone(monkeypatch):
+    log = run_call(monkeypatch, GREETED + [
+        SPEECH, text("Can you give me the recipe?"), Wait(REPLY_S + 0.05), played("m1"),
+        *TALK, text("Okay."), Wait(0.03), played("m4"), played("m5"),  # the resumed s2 and s3
+        SPEECH, text("And for oatmeal?"), Wait(0.03),
+    ])
+    assert log == GREETING_LOG + [
+        ("reply", "Can you give me the recipe?"),
+        ("done", "Can you give me the recipe?"),
+        ("clear",),
+        ("resume", "Can you give me the recipe? s2"),
+        ("reply", "And for oatmeal?"),
+    ]
+
+
+def test_interruption_keeps_only_what_the_caller_heard(monkeypatch):
+    log = run_call(monkeypatch, GREETED + [
+        SPEECH, text("Can you give me the recipe?"), Wait(REPLY_S + 0.05), played("m1"),
+        *TALK, text("Actually, what about oatmeal?"), Wait(0.03),
+    ])
+    assert log == GREETING_LOG + [
+        ("reply", "Can you give me the recipe?"),
+        ("done", "Can you give me the recipe?"),
+        ("clear",),
+        ("history", "Can you give me the recipe? s1"),
+        ("reply", "Actually, what about oatmeal?"),
+    ]
+
+
+def test_acknowledgement_after_the_reply_has_played_is_answered(monkeypatch):
+    # The agent had finished, so "Okay." is a turn of its own (an answer to a question, say).
+    log = run_call(monkeypatch, GREETED + [
+        SPEECH, text("Can you give me the recipe?"), Wait(REPLY_S + 0.05),
+        played("m1"), played("m2"), played("m3"),
+        *TALK, text("Okay."), EOT, Wait(HOLD_S + 0.05),
+    ])
+    assert log == GREETING_LOG + [
+        ("reply", "Can you give me the recipe?"),
+        ("done", "Can you give me the recipe?"),
+        ("reply", "Okay."),  # after the 1 s hold: one word looks unfinished
+    ]
+
+
+def test_acknowledgement_before_any_audio_is_answered(monkeypatch):
+    # Nothing had been said yet, so there's nothing to resume. Claude gets "Okay." after the
+    # question it never answered, and answers both.
+    log = run_call(monkeypatch, GREETED + [
+        SPEECH, text("Do you have Tuesday?"), Wait(0.03), *TALK, text("Okay."), EOT,
+        Wait(HOLD_S + 0.05),
+    ])
+    assert log == GREETING_LOG + [
+        ("reply", "Do you have Tuesday?"),
+        ("cancelled", "Do you have Tuesday?"),
+        ("clear",),
+        ("history", ""),
+        ("reply", "Okay."),
+    ]
+
+
+@pytest.mark.parametrize("said", [
+    "Mm hmm.", "Mm-hmm.", "Mmm.", "Mhm.", "Okay.", "OK.", "Uh-huh.", "Yeah, yeah.", "Right.",
+    "Got it.", "I see.", "Okay, go on.", "Yes.",
+])
+def test_acknowledgements(said):
+    assert turn_taking._is_acknowledgement(said)
+
+
+@pytest.mark.parametrize("said", [
+    "No.", "Stop.", "Wait.", "Hold on.", "Okay, but what about Tuesday?", "Thank you.",
+    "Actually, can you make it oatmeal?", "Sorry.", "",
+])
+def test_not_acknowledgements(said):
+    assert not turn_taking._is_acknowledgement(said)
+
+
 # --- Current quirks (pinned so a change to them is deliberate) ---
 
 
@@ -384,7 +500,7 @@ def test_phases(monkeypatch):
     async def main():
         replies = []
 
-        def start_reply(text):
+        def start_reply(text, spoken=None, cut_short=None):
             replies.append(text)
             return asyncio.create_task(asyncio.sleep(0))
 
