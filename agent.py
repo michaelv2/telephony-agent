@@ -17,6 +17,39 @@ SYSTEM_PROMPT = AGENT_PROMPT
 # Split on sentence boundaries, keeping the delimiter attached
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
+# A sentence longer than this is spoken in clauses, each at least _MIN_CLAUSE_CHARS long. Each
+# piece is sent to TTS and marked on its own, so a long list starts playing sooner, and a resume
+# after "mm-hmm" repeats one clause rather than the whole sentence. CHANGELOG-latency.md, entry 11.
+_LONG_CHARS = 100
+_MIN_CLAUSE_CHARS = 40
+_CLAUSE_END_RE = re.compile(r"(?:[,;:]| [—–])\s+")
+
+
+def _clause_cut(text: str) -> int | None:
+    """Where to cut a long sentence (finished or still streaming): after its last clause boundary
+    within the first _LONG_CHARS, or else its first boundary after that. None if it's short, has no
+    boundary yet, or the only boundaries are inside a [TAG: ...]."""
+    if len(text) <= _LONG_CHARS:
+        return None
+    cuts = [
+        m.end() for m in _CLAUSE_END_RE.finditer(text)
+        if m.start() + 1 >= _MIN_CLAUSE_CHARS and text.count("[", 0, m.start()) == text.count("]", 0, m.start())
+    ]
+    if not cuts:
+        return None
+    within = [c for c in cuts if c <= _LONG_CHARS]
+    return within[-1] if within else cuts[0]
+
+
+def _clauses(sentence: str) -> list[str]:
+    """A finished sentence, split into clauses if it's long."""
+    pieces = []
+    while (cut := _clause_cut(sentence)) is not None:
+        pieces.append(sentence[:cut].strip())
+        sentence = sentence[cut:]
+    pieces.append(sentence.strip())
+    return [p for p in pieces if p]
+
 
 class CallAgent:
     """Manages a single phone call conversation with Claude."""
@@ -48,19 +81,20 @@ class CallAgent:
                 buffer += text
                 full_response += text
 
-                # Yield complete sentences as they accumulate
+                # Yield complete sentences as they accumulate, long ones in clauses
                 parts = _SENTENCE_RE.split(buffer)
-                if len(parts) > 1:
-                    # All but the last part are complete sentences
-                    for sentence in parts[:-1]:
-                        sentence = sentence.strip()
-                        if sentence:
-                            yield sentence
-                    buffer = parts[-1]
+                buffer = parts.pop()  # The sentence still being written
+                for sentence in parts:
+                    for piece in _clauses(sentence):
+                        yield piece
+                # Don't wait for the end of a long sentence: yield its clauses as they arrive
+                while (cut := _clause_cut(buffer)) is not None:
+                    yield buffer[:cut].strip()
+                    buffer = buffer[cut:]
 
         # Yield whatever remains
-        if buffer.strip():
-            yield buffer.strip()
+        for piece in _clauses(buffer):
+            yield piece
 
         self.messages.append({"role": "assistant", "content": full_response})
         logger.info(f"Agent: {full_response}")

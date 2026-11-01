@@ -505,11 +505,55 @@ temperatures. On the 2026-11-01 13:28 call, half a second of noise took 2,188ms 
 **What it replaced:** decoding on the event loop, with faster-whisper's default temperature
 schedule (0.0 to 1.0).
 
+**Measured** (2026-11-01 bench, after entries 9-11, against the two earlier runs that day):
+Whisper time per transcript went from a median of 179-223ms (worst 1.5-1.9s) to a median of
+168ms (worst 314ms, n=83). The worst cases were the temperature retries.
+
 **What to watch for if this causes problems:**
 - **Garbled transcripts on noisy calls.** The retries sometimes rescued a bad first decode. Check
   the transcripts before restoring them.
 - Media messages are still read only after a transcription finishes, because `feed_audio`
   awaits it, but replies, marks and timers keep running meanwhile.
+- **Rollback:** revert the commit.
+
+---
+
+### 11. Long sentences are spoken in clauses (2026-11-01)
+
+**Status:** Applied on branch `turn-latency`. Tests in `test_agent.py` (4 cases).
+
+**What changed:** `agent.py`'s streaming splitter cuts a sentence longer than 100 characters
+after a clause boundary (comma, semicolon, colon or spaced dash), into pieces of at least 40
+characters. It never cuts inside a `[TAG: ...]`, because `server.py` strips tags from each piece
+separately. A still-streaming sentence is cut as soon as it passes 100 characters, so its first
+piece goes to TTS before Claude has finished it. Each piece is its own TTS request and has its
+own mark. Claude's history keeps the full text.
+
+**Why:** On the 2026-11-01 13:28 call, Claude's ingredient lists were single 10-15s sentences.
+After an "Okay." 4s into one, the agent restarted the whole sentence, because a resume restarts
+from the beginning of the sentence that was playing. The same sentences delayed the first audio
+(3.3-4.0s on that call), since nothing could play until the whole list was written. A typical
+list now splits into 70-96 character pieces of about 5-6s each.
+
+**What it replaced:** splitting on `.`, `!` and `?` only. This is the "first-chunk clause
+splitting" idea from TODO.md, applied to every long sentence.
+
+**Measured** (2026-11-01, Phonon): the long-answer barge-in question's first audio went from a
+median of 2.12-2.14s to 2.00s (n=12; the p90 stayed at about 3.1s). The gain is small because
+Claude often opens with a short sentence ("Sure!"). Resumes now count pieces: from piece 1 of 4,
+2 of 6 and 1 of 7 on the bench. The standard bench (2.71s end to end, reply start unchanged at
+575/800ms) and the barge-in results (interrupts 0.32-0.34s, blip ignored, "mm-hmm" resumed 3/3)
+are within the earlier runs' range. The pause sweep was unchanged, except a question cut in at a
+2s pause in 1 of 2 runs, for the first time in 10. Its reply was short, so splitting didn't apply.
+Faster transcripts (entry 10) may have helped it, or it's noise.
+
+**What to watch for if this causes problems:**
+- **Odd intonation or small pauses at commas.** Each piece is synthesized on its own. Raise
+  `_LONG_CHARS` or `_MIN_CLAUSE_CHARS` in `agent.py` to split less often.
+- **Tag text spoken aloud.** A tag broken across pieces would have its text read out. The splitter
+  skips boundaries inside brackets; `test_tags_are_never_split` covers it.
+- **The pause boundary moving earlier.** Anything that brings the first audio sooner shortens the
+  safe pause. Watch the 2s row of the pause sweep.
 - **Rollback:** revert the commit.
 
 ---
@@ -528,3 +572,4 @@ schedule (0.0 to 1.0).
 | 2026-11-01 | Phonon as the default TTS | All latency measurements since 2026-10-27 used it |
 | 2026-11-01 | Barge-in tracks playback, 250ms gate, `clear` | Replies stacked up to 37s behind on a live call |
 | 2026-11-01 | Resume after acknowledgements, not a higher gate | A higher gate would ignore "stop" and "wait" |
+| 2026-11-01 | Clause pieces for long sentences | Resume repeats a clause, not a 15s list; earlier first audio |

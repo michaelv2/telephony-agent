@@ -38,7 +38,7 @@ Marks, `clear` and the 250ms gate shipped together on 2026-11-01 (CHANGELOG-late
 
 ### Claude's first sentence (step 2)
 
-- [ ] **First-chunk clause splitting first** (see Latency optimizations below). Measure it, then decide whether to try a faster reply model such as Haiku. That's a quality trade-off, best judged on a call. Every ms saved also shortens the safe pause, so re-run the pause sweep afterwards.
+- [x] **First-chunk clause splitting first** (done 2026-11-01 for every sentence over 100 characters, entry 11: the long-answer first audio fell from 2.13s to 2.00s median; most first sentences are short). Measure it, then decide whether to try a faster reply model such as Haiku. That's a quality trade-off, best judged on a call. Every ms saved also shortens the safe pause, so re-run the pause sweep afterwards.
 
 ### Streaming transcription (step 3)
 
@@ -67,7 +67,7 @@ Marks, `clear` and the 250ms gate shipped together on 2026-11-01 (CHANGELOG-late
 
 - [ ] **Speculative Claude call during Haiku classification**: For ambiguous turns that go to Haiku, start the Claude API call in parallel. If Haiku says COMPLETE, Claude is already streaming (~1s saved). If INCOMPLETE, cancel it. Low waste since the fast-path handles obvious cases.
 - [ ] **TTS prefetching**: Start TTS for sentence N+1 while sending audio chunks for sentence N. Reduces gaps between sentences on multi-sentence responses (~0.5-1s savings per sentence).
-- [ ] **First-chunk clause splitting**: For the first chunk only, split on clause boundaries (commas) instead of sentence boundaries to get something to TTS faster. Revert to sentence boundaries after the first chunk is playing (~0.3-0.5s off time-to-first-audio).
+- [x] **First-chunk clause splitting** (done for all long sentences, entry 11): For the first chunk only, split on clause boundaries (commas) instead of sentence boundaries to get something to TTS faster. Revert to sentence boundaries after the first chunk is playing (~0.3-0.5s off time-to-first-audio).
 
 ## Call transfer improvements
 

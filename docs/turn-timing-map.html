@@ -331,7 +331,7 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
       <li><b>What sets it off:</b> 250ms of speech (<code>BARGE_IN_MS</code>) while the agent is talking: writing a reply, sending it, or still playing it.</li>
       <li><b>What it does:</b> cancels the reply, then sends Twilio <code>clear</code>, which drops the audio queued for the phone. The caller hears about 300ms of the agent after starting to talk; before 1 Nov it was 6–17s.</li>
       <li><b>Shorter sounds don't stop it:</b> a cough or click under 250ms is ignored, and its transcript gets no reply.</li>
-      <li><b>Acknowledgements resume the reply:</b> an “mm-hmm” or “okay” is longer than 250ms, so it stops the agent. About 1s later, once its transcript shows it was only an acknowledgement, the reply picks up from the start of the sentence the caller was hearing. A sound with no words in it (a breath, a laugh) does the same, about 0.8s after it ends.</li>
+      <li><b>Acknowledgements resume the reply:</b> an “mm-hmm” or “okay” is longer than 250ms, so it stops the agent. About 1s later, once its transcript shows it was only an acknowledgement, the reply picks up from the start of the sentence the caller was hearing, or the clause, for a long sentence. A sound with no words in it (a breath, a laugh) does the same, about 0.8s after it ends.</li>
       <li><b>Claude's history keeps what the caller heard:</b> after a real interruption, only the sentences that finished playing stay in the history.</li>
       <li><b>During the greeting</b> barge-in is off until the greeting has finished playing.</li>
     </ul>
@@ -373,6 +373,7 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
           <tr><td>Acknowledgement</td><td class="num">≤ 4 words</td><td><code>_is_acknowledgement</code></td><td>“mm-hmm”, “okay”, “yeah”… after a cut-off: resume (entry 8)</td></tr>
           <tr><td>Claude's first sentence</td><td class="num">1.1–4.2s</td><td><code>agent.py</code></td><td>Sonnet 5 time to first sentence; the biggest and noisiest stage (entry 4)</td></tr>
           <tr><td>TTS first audio</td><td class="num">~20ms</td><td><code>tts.py</code></td><td>Streams PCM chunk by chunk (entry 3)</td></tr>
+          <tr><td>Long sentence split</td><td class="num">&gt; 100 chars</td><td><code>_LONG_CHARS</code></td><td>Clauses of 40+ chars, each its own TTS piece and mark (entry 11)</td></tr>
         </tbody>
       </table>
     </div>
@@ -382,7 +383,7 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
   <section>
     <h2>Known gaps</h2>
     <ul class="gaps">
-      <li><span><b>An “mm-hmm” costs about a second.</b> The agent stops, waits for the transcript, then repeats the sentence that was playing.</span></li>
+      <li><span><b>An “mm-hmm” costs about a second.</b> The agent stops, waits for the transcript, then repeats the sentence or clause that was playing.</span></li>
       <li><span><b>A “yes” said mid-reply resumes the reply.</b> If the agent asked a question and kept talking, that answer goes unanswered.</span></li>
       <li><span><b>A “Hello?” during the greeting starts a second reply,</b> whose audio queues behind the greeting.</span></li>
       <li><span><b>One STT instance is shared by every call,</b> so two calls at once would mix their VAD state.</span></li>

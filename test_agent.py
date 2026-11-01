@@ -221,3 +221,59 @@ async def test_retried_reply_does_not_repeat_the_unanswered_question():
         {"role": "user", "content": "Tuesday?"},
         {"role": "assistant", "content": "Yes."},
     ]
+
+
+RECIPE = (
+    "You'll need two and a quarter cups flour, a teaspoon baking soda, a teaspoon salt, "
+    "a cup of softened butter, three quarters cup brown sugar, two eggs, and two cups of chips."
+)
+
+
+def test_long_sentence_is_split_into_clauses():
+    from agent import _clauses, _LONG_CHARS, _MIN_CLAUSE_CHARS
+    pieces = _clauses(RECIPE)
+    assert len(pieces) > 1
+    assert " ".join(pieces) == RECIPE
+    assert all(len(p) <= _LONG_CHARS for p in pieces[:-1])
+    assert all(len(p) >= _MIN_CLAUSE_CHARS for p in pieces[:-1])
+    assert pieces[0].endswith(",")
+
+
+def test_short_sentence_is_not_split():
+    from agent import _clauses
+    assert _clauses("Sure, I can help with that, no problem.") == ["Sure, I can help with that, no problem."]
+
+
+def test_tags_are_never_split():
+    from agent import _clauses
+    tag = "[SUMMARY: Booked a cleaning for Tuesday, 10am, with Dr. Lee, confirmation sent by text, all set]"
+    sentence = f"Great, you're all set for Tuesday at ten {tag} thanks again for calling today, goodbye."
+    pieces = _clauses(sentence)
+    assert any(tag in p for p in pieces)
+    assert " ".join(pieces) == sentence
+
+
+@pytest.mark.asyncio
+async def test_clauses_are_yielded_while_the_sentence_is_still_streaming():
+    tokens = [w + " " for w in RECIPE.split()]
+    consumed = []
+
+    class CountingStream(MockTextStream):
+        async def __anext__(self):
+            token = await super().__anext__()
+            consumed.append(token)
+            return token
+
+    context = MockStreamContext([])
+    context.text_stream = CountingStream(tokens)
+    with patch("agent.client") as mock_client:
+        mock_client.messages.stream.return_value = context
+        from agent import CallAgent
+        agent = CallAgent()
+        stream = agent.respond_stream("Recipe?")
+        first = await stream.__anext__()
+        at_first = len(consumed)
+        rest = [s async for s in stream]
+    assert first.endswith(",") and at_first < len(tokens)  # before the sentence was finished
+    assert " ".join([first, *rest]) == RECIPE
+    assert agent.messages[-1]["content"].strip() == RECIPE  # history keeps the whole text

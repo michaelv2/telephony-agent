@@ -36,7 +36,7 @@ The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whi
 
 **`turn_taking.py`** — When the agent replies and when caller speech cuts it off. `TurnTaking` holds one call's state: caller phases `LISTENING` / `WAITING` (for end of turn) / `HOLDING` (unfinished text, 1s timeout), plus the current reply, `Playback` (Twilio marks not yet sent back, so it knows when the caller is still hearing audio) and barge-in. It also has the completeness rules (`_is_obviously_complete`, `_is_complete_turn`). No I/O; `test_turn_taking.py` drives it with scripted STT signals.
 
-**`agent.py`** — `CallAgent` uses the async Anthropic client (`AsyncAnthropic`, `client.messages.stream`). Maintains conversation history per call. Splits Claude's streamed text on sentence boundaries (`[.!?]\s+`) and yields each sentence to TTS immediately for low latency.
+**`agent.py`** — `CallAgent` uses the async Anthropic client (`AsyncAnthropic`, `client.messages.stream`). Maintains conversation history per call. Splits Claude's streamed text on sentence boundaries (`[.!?]\s+`), and sentences over 100 characters at clause boundaries, never inside a `[TAG]` (CHANGELOG-latency.md, entry 11). Each piece goes to TTS as soon as it's complete.
 
 **`audio.py`** — Bidirectional format conversion. Twilio sends base64 mulaw 8kHz; Whisper needs PCM 16kHz; Kokoro outputs WAV (24kHz). Key functions: `twilio_payload_to_pcm16k` (inbound) and `wav_bytes_to_mulaw_payloads` (outbound, chunks WAV into 20ms mulaw frames).
 
