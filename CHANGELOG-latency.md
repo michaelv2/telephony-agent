@@ -332,8 +332,9 @@ describe Phonon. Its first audio arrives about 20ms after the TTS request.
 **What to watch for if this causes problems:**
 - **A voice from another backend breaks every reply.** With `TTS_VOICE=af_heart` on Phonon, the
   TTS server raises `LookupError: no voice 'af_heart' is registered`. Calls still connect but
-  the agent is silent, and the old setup checks all passed. `deploy.sh` writes
-  `TTS_VOICE=af_heart` into a new `.env`, and still provisions Kokoro.
+  the agent is silent, and the old setup checks all passed. An existing `.env` with
+  `TTS_VOICE=af_heart` (which `deploy.sh` used to write) has to be changed. `deploy.sh` now
+  provisions Phonon and leaves `TTS_VOICE` unset.
 - Phonon runs on the CPU, so heavy CPU load elsewhere on the host shows up as TTS latency.
 - **Rollback:** `./start.sh kokoro`, or revert the commit.
 
