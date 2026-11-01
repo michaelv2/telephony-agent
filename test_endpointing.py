@@ -40,6 +40,7 @@ def make_stt(early_ms, silence_ms=800):
     stt._early_frames_needed = min(stt._silence_frames_needed, frames(early_ms))
     stt._audio_buffer = bytearray()
     stt._speech_active = False
+    stt._speech_frames = 0
     stt._silence_count = 0
     stt._pending_transcript = None
     stt._vad_leftover = bytearray()
@@ -92,3 +93,21 @@ class TestTwoStage:
         stt = make_stt(early_ms=400)
         events = feed(stt, 0.0, 60)
         assert first(events, 0) is None and first(events, 1) is None
+
+
+class TestSpeechMs:
+    """speech_ms counts speech frames only, so a cough stays short while speech_active stays on."""
+
+    def test_counts_speech_frames_not_the_silence_after_them(self):
+        stt = make_stt(early_ms=400)
+        feed(stt, 0.9, 3)  # a 96 ms cough
+        feed(stt, 0.0, 5)
+        assert stt.speech_active and stt.speech_ms == 96
+        feed(stt, 0.9, 5)
+        assert stt.speech_ms == 256
+
+    def test_resets_when_the_utterance_is_transcribed(self):
+        stt = make_stt(early_ms=400)
+        feed(stt, 0.9, 10)
+        feed(stt, 0.0, 12)  # transcribed at the early threshold
+        assert not stt.speech_active and stt.speech_ms == 0

@@ -23,4 +23,9 @@ class BaseSTT(ABC):
     @property
     @abstractmethod
     def speech_active(self) -> bool:
-        """True if VAD currently detects speech."""
+        """True from the first speech frame of an utterance until it is transcribed."""
+
+    @property
+    @abstractmethod
+    def speech_ms(self) -> int:
+        """Milliseconds of actual speech heard in the current utterance (silent frames not counted)."""

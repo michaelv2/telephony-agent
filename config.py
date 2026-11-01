@@ -26,6 +26,9 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base.en")
 # VAD_EARLY_MS=VAD_SILENCE_MS restores single-threshold behaviour.
 VAD_SILENCE_MS = int(os.environ.get("VAD_SILENCE_MS", "800"))
 VAD_EARLY_MS = int(os.environ.get("VAD_EARLY_MS", "400"))
+# Speech needed while the agent talks before it stops and clears its queued audio. Coughs and
+# clicks are shorter; see CHANGELOG-latency.md, entry 7.
+BARGE_IN_MS = int(os.environ.get("BARGE_IN_MS", "250"))
 
 PORT = int(os.environ.get("PORT", "9002"))
 

@@ -15,6 +15,7 @@ logger = logging.getLogger("stt.whisper")
 # Silero VAD works on 16kHz 512-sample (32ms) frames
 VAD_FRAME_SAMPLES = 512
 SAMPLE_RATE = 16000
+VAD_FRAME_MS = VAD_FRAME_SAMPLES * 1000 // SAMPLE_RATE  # 32
 BYTES_PER_SAMPLE = 2  # 16-bit
 
 
@@ -47,6 +48,7 @@ class WhisperSTT(BaseSTT):
 
         self._audio_buffer = bytearray()
         self._speech_active = False
+        self._speech_frames = 0  # speech frames in the current utterance
         self._silence_count = 0
         self._pending_transcript: str | None = None
         self._vad_leftover = bytearray()
@@ -76,6 +78,7 @@ class WhisperSTT(BaseSTT):
 
             if is_speech:
                 self._speech_active = True
+                self._speech_frames += 1
                 self.speech_ended_at = time.monotonic()
                 self._silence_count = 0
                 self._eot_silence = None  # caller kept talking: the turn hasn't ended
@@ -140,9 +143,14 @@ class WhisperSTT(BaseSTT):
     def speech_active(self) -> bool:
         return self._speech_active
 
+    @property
+    def speech_ms(self) -> int:
+        return self._speech_frames * VAD_FRAME_MS
+
     def reset(self) -> None:
         self._audio_buffer.clear()
         self._speech_active = False
+        self._speech_frames = 0
         self._silence_count = 0
         self._vad_leftover.clear()
         self._eot_silence = None

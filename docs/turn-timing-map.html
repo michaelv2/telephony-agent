@@ -119,7 +119,7 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
 
 <main>
   <header>
-    <div class="eyebrow">telephony-agent · branch turn-latency · 31 Oct 2026</div>
+    <div class="eyebrow">telephony-agent · branch turn-latency · 1 Nov 2026</div>
     <h1>Turn Timing Map</h1>
     <p>This page follows one caller turn: how the agent decides the caller has finished, when the reply starts, and when the caller can still cut the reply off. Times count from the caller's last word. Phase and function names match <code>turn_taking.py</code>.</p>
     <div class="key" aria-label="Color key">
@@ -271,7 +271,7 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
     <h2>The reply, and when the caller can cut it off</h2>
     <figure>
       <div class="plot">
-        <svg viewBox="0 0 960 320" role="img" aria-label="Timeline of a two-sentence reply. Claude takes about two seconds for the first sentence. Each sentence's audio is sent to Twilio in a short burst, so sending ends near 3.3 seconds while playback runs to about 7 seconds. Today barge-in is armed only until sending ends. After the planned fix it stays armed until playback ends.">
+        <svg viewBox="0 0 960 320" role="img" aria-label="Timeline of a two-sentence reply. Claude takes about two seconds for the first sentence. Each sentence's audio is sent to Twilio in a short burst, so sending ends near 3.3 seconds while playback runs to about 7 seconds. Barge-in used to be armed only until sending ended. Now it stays armed until playback ends.">
           <defs>
             <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
               <rect class="hatch-bg" width="7" height="7"/>
@@ -314,30 +314,30 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
           <line class="rule" x1="16" y1="198" x2="944" y2="198"/>
           <text class="t-head" x="16" y="222">CAN CALLER SPEECH CUT IT OFF?</text>
 
-          <text class="t" x="16" y="258">Today</text>
+          <text class="t" x="16" y="258">Before 1 Nov</text>
           <rect class="box-ok" x="180" y="245" width="297" height="18" rx="3"/>
           <text class="t-in" x="190" y="258">armed</text>
           <rect class="box-bad" x="477" y="245" width="333" height="18" rx="3"/>
           <text class="t-in" x="643" y="258" text-anchor="middle">not armed: talking doesn't stop it</text>
 
-          <text class="t" x="16" y="304">After the fix</text>
+          <text class="t" x="16" y="304">Now</text>
           <rect class="box-ok" x="180" y="291" width="630" height="18" rx="3"/>
           <text class="t-in" x="190" y="304">armed until playback ends (Twilio marks)</text>
         </svg>
       </div>
-      <figcaption>Audio goes to Twilio much faster than it plays (Phonon sends 5s of audio in under 1s), so sending ends long before the caller has heard the reply. Barge-in is tied to sending, so it switches off while most of the reply is still playing. The fix is planned in TODO.md.</figcaption>
+      <figcaption>Audio goes to Twilio much faster than it plays (Phonon sends 5s of audio in under 1s), so sending ends long before the caller has heard the reply. Barge-in used to be tied to sending, so it switched off while most of the reply was still playing. Since 1 Nov, a Twilio mark after each sentence keeps it armed until the caller has heard the last one.</figcaption>
     </figure>
     <ul>
-      <li><b>What sets it off today:</b> one 32ms VAD frame of speech while a reply is being written or sent, once the greeting has been sent. It cancels the reply task.</li>
-      <li><b>What it doesn't do today:</b> audio already sent stays queued at Twilio and keeps playing, because no <code>clear</code> message is sent.</li>
-      <li><b>The planned fix, shipped together:</b> Twilio <code>mark</code> messages keep barge-in armed until playback ends, <code>clear</code> drops the queued audio, and ~250ms of continuous speech is required so a cough or “mm-hmm” can't cut the agent off.</li>
-      <li><b>During the greeting</b> barge-in is off entirely.</li>
+      <li><b>What sets it off:</b> 250ms of speech (<code>BARGE_IN_MS</code>) while the agent is talking: writing a reply, sending it, or still playing it.</li>
+      <li><b>What it does:</b> cancels the reply, then sends Twilio <code>clear</code>, which drops the audio queued for the phone. The caller hears about 300ms of the agent after starting to talk; before 1 Nov it was 6–17s.</li>
+      <li><b>Shorter sounds don't stop it:</b> a cough or click under 250ms is ignored, and its transcript gets no reply. An “mm-hmm” is longer, so it still stops the agent.</li>
+      <li><b>During the greeting</b> barge-in is off until the greeting has finished playing.</li>
     </ul>
   </section>
 
   <section>
     <h2>How long a mid-sentence pause can be</h2>
-    <p>If the caller pauses mid-thought, a reply may start during the pause. When they resume before its first audio arrives, barge-in cancels it and nobody hears it. So a pause is safe while it's shorter than the time from the caller stopping to the reply's first audio: the reply start (about 0.55s after a question, 0.8s after a statement) plus Claude's first sentence and TTS. On 31 Oct that came to about 2.4s at the median, and Claude's spread makes the edge fuzzy.</p>
+    <p>If the caller pauses mid-thought, a reply may start during the pause. When they resume before its first audio arrives, barge-in cancels it after 250ms of their speech, and nobody hears it. So a pause is safe while it's shorter than the time from the caller stopping to the reply's first audio: the reply start (about 0.55s after a question, 0.8s after a statement) plus Claude's first sentence and TTS. On 31 Oct that came to about 2.4s at the median, and Claude's spread makes the edge fuzzy.</p>
     <div class="tablewrap">
       <table class="pause">
         <thead><tr><th>Pause</th><th>After a question</th><th>After a statement</th></tr></thead>
@@ -351,7 +351,7 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
         </tbody>
       </table>
     </div>
-    <p>Runs where the agent's audio cut into the pause, out of 6: three sweeps of <code>bench_turn_latency.py --pauses</code> with 2 runs each (27 Oct, and 31 Oct before and after the refactor, which didn't change timing). Anything that makes Claude's first sentence faster moves this edge earlier by the same amount. The 250ms barge-in gate moves it earlier by up to 250ms, because a reply then gets 250ms more to produce audio before it's cancelled.</p>
+    <p>Runs where the agent's audio cut into the pause, out of 6: three sweeps of <code>bench_turn_latency.py --pauses</code> with 2 runs each (27 Oct, and 31 Oct before and after the refactor, which didn't change timing). Anything that makes Claude's first sentence faster moves this edge earlier by the same amount. The 250ms barge-in gate could move it earlier by up to 250ms, because a reply gets 250ms more to produce audio before it's cancelled; the 1 Nov sweep showed no measurable change. A cut-in now costs the caller about 300ms of audio before the <code>clear</code>, not a whole sentence.</p>
   </section>
 
   <section>
@@ -367,7 +367,7 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
           <tr><td>Question or hand-off</td><td class="num">? or phrase</td><td><code>_is_obviously_complete</code></td><td>The clearest end-of-turn signal (entry 4)</td></tr>
           <tr><td>Complete statement</td><td class="num">. ! ? + 3 words</td><td><code>_is_complete_turn</code></td><td>Local rules replaced a 200–500ms Haiku call (entry 1)</td></tr>
           <tr><td>Hold for unfinished text</td><td class="num">1s</td><td><code>_HOLD_TIMEOUT_SECONDS</code></td><td>Safety net for the rules, cut from 2s (entry 1)</td></tr>
-          <tr><td>Barge-in trigger</td><td class="num">1 frame</td><td><code>TurnTaking.on_audio</code></td><td>Not tuned yet; 250ms gate planned (TODO.md)</td></tr>
+          <tr><td>Barge-in trigger</td><td class="num">250ms of speech</td><td><code>BARGE_IN_MS</code></td><td>Longer than a cough; an “mm-hmm” still passes (entry 7)</td></tr>
           <tr><td>Claude's first sentence</td><td class="num">1.1–4.2s</td><td><code>agent.py</code></td><td>Sonnet 5 time to first sentence; the biggest and noisiest stage (entry 4)</td></tr>
           <tr><td>TTS first audio</td><td class="num">~20ms</td><td><code>tts.py</code></td><td>Streams PCM chunk by chunk (entry 3)</td></tr>
         </tbody>
@@ -379,13 +379,13 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
   <section>
     <h2>Known gaps</h2>
     <ul class="gaps">
-      <li><span><b>Barge-in switches off while the reply is still playing.</b> It's tied to sending, not playback. Fix: Twilio marks.</span></li>
-      <li><span><b>Barge-in doesn't stop audio already sent.</b> Fix: send Twilio <code>clear</code>, together with the 250ms gate.</span></li>
-      <li><span><b>A “Hello?” during the greeting starts a second reply</b> that sends audio alongside the greeting. When the greeting finishes it also switches barge-in off for that second reply, because the two share one flag.</span></li>
+      <li><span><b>An “mm-hmm” or “okay” stops the agent,</b> because it's longer than 250ms, and the agent then answers it after the 1s hold.</span></li>
+      <li><span><b>A “Hello?” during the greeting starts a second reply,</b> whose audio queues behind the greeting.</span></li>
+      <li><span><b>A cut-off reply leaves nothing in Claude's history,</b> although the caller may have heard part of it.</span></li>
       <li><span><b>Whisper's decoding blocks everything else for 100–200ms each turn.</b> faster-whisper decodes lazily, so the work runs on the event loop instead of the executor. No audio is read or sent meanwhile.</span></li>
       <li><span><b>One STT instance is shared by every call,</b> so two calls at once would mix their VAD state.</span></li>
     </ul>
   </section>
 
-  <footer>This page lives at <code>docs/turn-timing-map.html</code> and is updated whenever the turn logic changes. Sources: <code>turn_taking.py</code>, <code>stt/whisper_stt.py</code>, <code>CHANGELOG-latency.md</code> entries 1–4, <code>TODO.md</code>. The quirks above are pinned by the <code>test_quirk_*</code> tests in <code>test_turn_taking.py</code>.</footer>
+  <footer>This page lives at <code>docs/turn-timing-map.html</code> and is updated whenever the turn logic changes. Sources: <code>turn_taking.py</code>, <code>stt/whisper_stt.py</code>, <code>CHANGELOG-latency.md</code> entries 1–4, <code>TODO.md</code>. The greeting quirk above is pinned by <code>test_quirk_question_during_greeting_starts_second_reply</code> in <code>test_turn_taking.py</code>.</footer>
 </main>

@@ -26,7 +26,7 @@ Set Twilio voice webhook to `{PUBLIC_URL}/call/inbound` (POST).
 - `ANTHROPIC_API_KEY`
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `TWILIO_PHONE`
 
-Optional: `TTS_URL`, `TTS_VOICE` (`Freya`; must be a voice of the running TTS model, and `start.sh` picks one per model when unset), `WHISPER_MODEL` (`base.en`), `PORT` (`9002`), `PUBLIC_URL` (auto-detected from ngrok), `AGENT_PROMPT`, `ALLOWED_NUMBERS`, `VAD_EARLY_MS` (`400`), `VAD_SILENCE_MS` (`800`).
+Optional: `TTS_URL`, `TTS_VOICE` (`Freya`; must be a voice of the running TTS model, and `start.sh` picks one per model when unset), `WHISPER_MODEL` (`base.en`), `PORT` (`9002`), `PUBLIC_URL` (auto-detected from ngrok), `AGENT_PROMPT`, `ALLOWED_NUMBERS`, `VAD_EARLY_MS` (`400`), `VAD_SILENCE_MS` (`800`), `BARGE_IN_MS` (`250`).
 
 ## Architecture
 
@@ -34,7 +34,7 @@ The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whi
 
 **`server.py`** — FastAPI app. Four HTTP endpoints (`/call/inbound`, `/call/outbound` for TwiML, `/sms/inbound` to start a call by text, `/api/call` to initiate outbound calls) and one WebSocket endpoint (`/ws/media`) that handles the Twilio Media Stream protocol. Each media event is decoded and fed to STT, and the STT signals go to `TurnTaking`, which starts and cancels `_stream_agent_response` tasks (Claude -> TTS -> Twilio).
 
-**`turn_taking.py`** — When the agent replies and when caller speech cuts it off. `TurnTaking` holds one call's state: caller phases `LISTENING` / `WAITING` (for end of turn) / `HOLDING` (unfinished text, 1s timeout), plus the current reply and barge-in. It also has the completeness rules (`_is_obviously_complete`, `_is_complete_turn`). No I/O; `test_turn_taking.py` drives it with scripted STT signals.
+**`turn_taking.py`** — When the agent replies and when caller speech cuts it off. `TurnTaking` holds one call's state: caller phases `LISTENING` / `WAITING` (for end of turn) / `HOLDING` (unfinished text, 1s timeout), plus the current reply, `Playback` (Twilio marks not yet sent back, so it knows when the caller is still hearing audio) and barge-in. It also has the completeness rules (`_is_obviously_complete`, `_is_complete_turn`). No I/O; `test_turn_taking.py` drives it with scripted STT signals.
 
 **`agent.py`** — `CallAgent` uses the async Anthropic client (`AsyncAnthropic`, `client.messages.stream`). Maintains conversation history per call. Splits Claude's streamed text on sentence boundaries (`[.!?]\s+`) and yields each sentence to TTS immediately for low latency.
 
@@ -59,4 +59,5 @@ The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whi
 - **Sentence-level streaming**: Claude's response is split on sentence boundaries and each sentence is sent to TTS independently, rather than waiting for the full response. This is the core latency optimization.
 - **VAD-gated transcription**: Audio is only sent to Whisper after Silero VAD detects a pause (400ms silence), avoiding constant transcription of silence/noise. The turn ends at 800ms unless the transcript is a question (CHANGELOG-latency.md, entry 4).
 - **Async Anthropic client**: `agent.py` uses `anthropic.AsyncAnthropic`. The sync client blocked the event loop between tokens, stalling audio processing and barge-in (CHANGELOG-latency.md, entry 2).
+- **Barge-in tracks playback**: the agent counts as talking until Twilio sends back the mark after its last sentence. `BARGE_IN_MS` (250) of speech while it talks cancels the reply and sends Twilio `clear`. Shorter sounds are ignored, and so is their transcript (CHANGELOG-latency.md, entry 7).
 - **One STT instance**: `WhisperSTT` is loaded once at startup as a global. Models are GPU-resident (`cuda`, `float16`).

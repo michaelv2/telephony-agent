@@ -340,6 +340,73 @@ describe Phonon. Its first audio arrives about 20ms after the TTS request.
 
 ---
 
+### 7. Barge-in during playback: marks, `clear` and a 250ms speech gate (2026-11-01)
+
+**Status:** Applied on branch `turn-latency`. Tests in `test_turn_taking.py` (17 cases) and
+`test_endpointing.py` (6 cases). Measured with `bench_turn_latency.py --barge-in` and the pause
+sweep.
+
+**What changed:**
+- `server.py`: after each sentence's audio, `_stream_agent_response` sends a Twilio `mark`, and
+  `media_stream` passes the marks Twilio sends back to `TurnTaking.on_mark`. On barge-in, once the
+  cancelled reply has stopped sending, it sends Twilio `clear`.
+- `turn_taking.py`: `Playback` tracks the marks Twilio hasn't sent back yet. The agent counts as
+  talking while a reply is being written or sent, or its audio is still playing. Barge-in needs
+  `BARGE_IN_MS` (250) of speech while it talks, then cancels the reply and clears the audio.
+  Speech that started while the agent talked and didn't reach 250ms gets no reply. The greeting
+  can't be cut off until it has finished playing; before, that lasted only until it was sent.
+- `stt/`: `speech_ms` counts the speech frames in the current utterance. `speech_active` stays on
+  through up to 400ms of silence, so it can't tell a cough from a sentence.
+- `config.py`: `BARGE_IN_MS`.
+- The shared `speaking` flag is gone. That also fixes a reply overlapping the greeting losing
+  barge-in when the greeting finished (the old `test_quirk_greeting_finishing_disarms_*`).
+
+**Why:** Barge-in was tied to sending, and several seconds of audio send in about a second. On
+the 2026-11-01 live call it fired once; after that each reply queued behind the audio still
+playing, and the agent fell up to ~37s behind the caller. Even when it fired, nothing stopped the
+audio already queued at Twilio.
+
+**What it replaced:** one 32ms speech frame cancelled a reply while it was being written or
+sent. Audio already sent always played to the end.
+
+**Measured** (2026-11-01, Phonon, 3 runs per case; "heard after" is agent audio the caller hears
+after starting to talk):
+
+| Case | Heard after: before → after | Barge-in fired | `clear` | Agent replied to it |
+|---|---|---|---|---|
+| Interrupt 1s into the reply | 5.8s → 0.30s | 3/3 → 3/3 | 0/3 → 3/3 | 3/3 → 3/3 (expected) |
+| Interrupt 3s into the reply | 16.6s → 0.28s | 0/3 → 3/3 | 0/3 → 3/3 | 3/3 → 3/3 (expected) |
+| 160ms blip of speech, 1.5s in | carries on → carries on | 3/3 → 0/3 | 0/3 → 0/3 | 1/3 → 0/3 |
+| "Mm-hmm", 1.5s in | 11.8s → 0.27s | 3/3 → 3/3 | 0/3 → 3/3 | 3/3 → 3/3 |
+
+Before, a false trigger silently dropped the sentences not yet sent. Now a blip doesn't stop the
+agent at all.
+
+Pause sweep (2 runs per cell; cells are runs where agent audio cut into the pause):
+
+| Pause | Question, before (3 sweeps) | Question, after | Statement, before (3 sweeps) | Statement, after |
+|---|---|---|---|---|
+| 0.5-1.5s | 0 of 6 each | 0/2 each | 0 of 6 each | 0/2 each |
+| 2s | 0 of 6 | 0/2 | 2 of 6 | 1/2 |
+| 2.5s | 6 of 6 | 1/2 | 4 of 6 | 2/2 |
+| 3s | 6 of 6 | 2/2 | 6 of 6 | 2/2 |
+
+The boundary didn't move measurably. A cut-in now costs the caller about 300ms of agent audio
+before the `clear`, where it used to cost a whole sentence or more.
+
+**What to watch for if this causes problems:**
+- **"Mm-hmm" still stops the agent.** It is longer than 250ms, so the agent stops, then replies
+  to "Mm." after the 1s hold (3 of 3). The next step is in TODO.md.
+- **The agent stops on noise, or ignores the caller.** Tune `BARGE_IN_MS` (env var): raise it if
+  noise stops the agent, lower it if short interruptions are missed. 32 restores a one-frame
+  trigger, still with marks and `clear`.
+- **The agent ignores everything said while it talks.** That would mean marks aren't coming
+  back, so it never stops counting as talking. Check the log for `Sent clear` and for mark events.
+  Twilio documents the echo, and the bench models it, but a live call is the real check.
+- **Rollback:** revert the commit.
+
+---
+
 ## Decision log
 
 | Date       | Decision                            | Rationale                                                     |
@@ -352,3 +419,4 @@ describe Phonon. Its first audio arrives about 20ms after the TTS request.
 | 2026-10-27 | Per-stage latency logs + bench harness  | Claude's 1.1-4.2s variance hides 200-400ms wins end to end    |
 | 2026-10-31 | Turn-taking state in one class, no timing change | Hard to follow across closures; barge-in work adds state |
 | 2026-11-01 | Phonon as the default TTS | All latency measurements since 2026-10-27 used it |
+| 2026-11-01 | Barge-in tracks playback, 250ms gate, `clear` | Replies stacked up to 37s behind on a live call |

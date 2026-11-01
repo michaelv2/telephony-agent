@@ -3,14 +3,18 @@
 Each test drives the real /ws/media handler with a scripted call. STT and the reply pipeline are
 faked, so no audio, GPU, Claude or TTS is involved. A media frame's payload is a command for the
 fake STT:
-  "speech"       VAD hears speech (the caller is talking)
-  "silence"      VAD hears silence
-  "text:<...>"   Whisper's transcript arrives (in production: after VAD_EARLY_MS of silence)
+  "speech"       one 32 ms VAD frame of speech
+  "silence"      one silent frame inside an utterance
+  "text:<...>"   Whisper's transcript arrives (in production: after VAD_EARLY_MS of silence),
+                 which ends the utterance
   "eot"          end of turn (in production: after VAD_SILENCE_MS of silence)
+A played("m1") message is Twilio sending back mark m1: the caller has heard that audio. Each fake
+reply sends one mark when it finishes sending (the greeting's is m0, then m1, m2, ...).
 
 Each test checks the log of what the agent did: ("reply", text) when a reply starts, ("done", text)
-when it finishes sending, ("cancelled", text) on barge-in. ("note", ...) entries mark points in
-the script, so a test can tell what happened before and after them.
+when it finishes sending, ("cancelled", text) on barge-in, and ("clear",) when it tells Twilio to
+drop the queued audio. ("note", ...) entries mark points in the script, so a test can tell what
+happened before and after them.
 """
 
 import asyncio
@@ -68,6 +72,14 @@ def text(t: str) -> dict:
     return media(f"text:{t}")
 
 
+def played(name: str) -> dict:
+    return {"event": "mark", "streamSid": "MZtest", "mark": {"name": name}}
+
+
+TALK = [SPEECH] * 8  # 256 ms of speech: enough to stop the agent (BARGE_IN_MS = 250)
+BLIP = [SPEECH] * 4  # 128 ms: a cough or a click
+
+
 class FakeWS:
     """Delivers the script one message at a time, then disconnects."""
 
@@ -79,7 +91,8 @@ class FakeWS:
         pass
 
     async def send_text(self, data: str):
-        pass
+        if json.loads(data).get("event") == "clear":
+            self.log.append(("clear",))
 
     async def receive_text(self) -> str:
         while self.script:
@@ -100,15 +113,26 @@ class FakeSTT:
     def __init__(self):
         self.speech_active = False
         self.speech_ended_at = 0.0
+        self._speech_frames = 0
         self._transcript = None
         self._end_of_turn = False
 
+    @property
+    def speech_ms(self) -> int:
+        return self._speech_frames * 32
+
     async def feed_audio(self, cmd: str) -> None:
-        self.speech_active = cmd == "speech"
-        if cmd.startswith("text:"):
-            self._transcript = cmd[len("text:"):]
-        elif cmd == "eot":
-            self._end_of_turn = True
+        if cmd == "speech":
+            self.speech_active = True
+            self._speech_frames += 1
+        elif cmd.startswith("text:") or cmd == "eot":
+            # Whisper has run, which ends the utterance, as in WhisperSTT
+            self.speech_active = False
+            self._speech_frames = 0
+            if cmd == "eot":
+                self._end_of_turn = True
+            else:
+                self._transcript = cmd[len("text:"):]
 
     async def get_transcript(self):
         t, self._transcript = self._transcript, None
@@ -137,19 +161,18 @@ def run_call(monkeypatch, script: list, greeting_s: float = GREETING_S) -> list:
     """Run one scripted call through server.media_stream and return the event log."""
     log: list = []
 
-    async def fake_reply(ws, agent, stream_sid, call_sid, connected, speaking,
+    async def fake_reply(ws, agent, stream_sid, call_sid, connected, playback,
                          transcript_log=None, transfer_number=None, user_text=None,
                          greeting=False, on_done=None, turn_t0=None):
         label = "greeting" if greeting else user_text
         log.append(("reply", label))
-        speaking.set()
         try:
             await asyncio.sleep(greeting_s if greeting else REPLY_S)
+            playback.mark()  # sent after its audio; comes back via played(...)
             log.append(("done", label))
         except asyncio.CancelledError:
             log.append(("cancelled", label))
         finally:
-            speaking.clear()
             if on_done:
                 on_done.set()
 
@@ -173,7 +196,7 @@ def run_call(monkeypatch, script: list, greeting_s: float = GREETING_S) -> list:
     return asyncio.run(main())
 
 
-GREETED = [START, Wait(0.05)]  # call starts and the greeting finishes sending
+GREETED = [START, Wait(0.05), played("m0")]  # the call starts, and the greeting is sent and heard
 GREETING_LOG = [("reply", "greeting"), ("done", "greeting")]
 
 
@@ -267,21 +290,22 @@ def test_stop_flushes_held_text(monkeypatch):
 # --- Barge-in ---
 
 
-def test_speech_during_reply_cancels_it(monkeypatch):
+def test_speech_during_reply_stops_it_and_clears_its_audio(monkeypatch):
     log = run_call(monkeypatch, GREETED + [
-        SPEECH, text("Do you have Tuesday?"), Wait(0.03), SPEECH, Wait(0.03),
+        SPEECH, text("Do you have Tuesday?"), Wait(0.03), *TALK, *TALK, Wait(0.03),
     ])
     assert log == GREETING_LOG + [
         ("reply", "Do you have Tuesday?"),
         ("cancelled", "Do you have Tuesday?"),
+        ("clear",),  # once, although the caller keeps talking
     ]
 
 
-def test_speech_after_reply_finished_sending_does_not_cancel(monkeypatch):
-    # The reply has been sent but would still be playing on the phone. Barge-in isn't armed
-    # (TODO.md: track playback with Twilio marks).
+def test_short_sound_during_reply_is_ignored(monkeypatch):
+    # Too short to stop the agent, so its transcript gets no reply either.
     log = run_call(monkeypatch, GREETED + [
-        SPEECH, text("Do you have Tuesday?"), Wait(REPLY_S + 0.05), SPEECH, Wait(0.03),
+        SPEECH, text("Do you have Tuesday?"), Wait(0.03), *BLIP, text("Sorry."), EOT,
+        Wait(REPLY_S + HOLD_S + 0.05),
     ])
     assert log == GREETING_LOG + [
         ("reply", "Do you have Tuesday?"),
@@ -289,29 +313,65 @@ def test_speech_after_reply_finished_sending_does_not_cancel(monkeypatch):
     ]
 
 
-def test_no_barge_in_during_greeting(monkeypatch):
-    log = run_call(monkeypatch, [START, Wait(0.02), SPEECH, Wait(0.03)], greeting_s=0.3)
+def test_speech_while_reply_still_plays_clears_it(monkeypatch):
+    # The reply has been sent, but its mark hasn't come back: the caller is still hearing it.
+    log = run_call(monkeypatch, GREETED + [
+        SPEECH, text("Do you have Tuesday?"), Wait(REPLY_S + 0.05), Note("sent, still playing"),
+        *TALK, text("Actually, what about Wednesday?"), Wait(0.03),
+    ])
+    assert log == GREETING_LOG + [
+        ("reply", "Do you have Tuesday?"),
+        ("done", "Do you have Tuesday?"),
+        ("note", "sent, still playing"),
+        ("clear",),
+        ("reply", "Actually, what about Wednesday?"),
+    ]
+
+
+def test_speech_after_reply_has_played_is_a_new_turn(monkeypatch):
+    log = run_call(monkeypatch, GREETED + [
+        SPEECH, text("Do you have Tuesday?"), Wait(REPLY_S + 0.05), played("m1"),
+        *BLIP, text("And Wednesday?"), Wait(0.03),
+    ])
+    assert log == GREETING_LOG + [
+        ("reply", "Do you have Tuesday?"),
+        ("done", "Do you have Tuesday?"),
+        ("reply", "And Wednesday?"),
+    ]
+
+
+def test_no_barge_in_while_greeting_is_sent(monkeypatch):
+    log = run_call(monkeypatch, [START, Wait(0.02), *TALK, Wait(0.03)], greeting_s=0.3)
     assert log == [("reply", "greeting")]
+
+
+def test_no_barge_in_while_greeting_plays(monkeypatch):
+    log = run_call(monkeypatch, [START, Wait(0.05), Note("sent, still playing"), *TALK, Wait(0.03)])
+    assert log == GREETING_LOG + [("note", "sent, still playing")]
+
+
+def test_reply_overlapping_greeting_can_be_stopped_once_greeting_has_played(monkeypatch):
+    log = run_call(monkeypatch, [
+        START, Wait(0.02), SPEECH, text("Hello?"), Wait(0.15), played("m0"), *TALK, Wait(0.03),
+    ], greeting_s=0.1)
+    assert log == [
+        ("reply", "greeting"),
+        ("reply", "Hello?"),
+        ("done", "greeting"),
+        ("cancelled", "Hello?"),
+        ("clear",),
+    ]
 
 
 # --- Current quirks (pinned so a change to them is deliberate) ---
 
 
 def test_quirk_question_during_greeting_starts_second_reply(monkeypatch):
-    # Both replies then send audio at the same time.
+    # Its audio queues behind the greeting's (TODO.md: overlapping replies during the greeting).
     log = run_call(monkeypatch, [
         START, Wait(0.02), SPEECH, text("Hello?"), Wait(0.03),
     ], greeting_s=0.3)
     assert log == [("reply", "greeting"), ("reply", "Hello?")]
-
-
-def test_quirk_greeting_finishing_disarms_barge_in_for_overlapping_reply(monkeypatch):
-    # Both replies share one `speaking` flag, so the greeting clears it while "Hello?" is still
-    # being sent, and speech can no longer cut "Hello?" off.
-    log = run_call(monkeypatch, [
-        START, Wait(0.02), SPEECH, text("Hello?"), Wait(0.15), SPEECH, Wait(0.03),
-    ], greeting_s=0.1)
-    assert log == [("reply", "greeting"), ("reply", "Hello?"), ("done", "greeting")]
 
 
 # --- Phases (the names used in turn_taking.py's docstring and the timing diagram) ---
@@ -328,7 +388,7 @@ def test_phases(monkeypatch):
             replies.append(text)
             return asyncio.create_task(asyncio.sleep(0))
 
-        t = turn_taking.TurnTaking(start_reply)
+        t = turn_taking.TurnTaking(start_reply, lambda reply: None)
         seen = [t.phase]
         t.on_transcript("I want to book a cleaning and")
         seen.append(t.phase)

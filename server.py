@@ -18,7 +18,7 @@ import tts
 from agent import CallAgent
 from audio import twilio_payload_to_pcm16k
 from stt import WhisperSTT
-from turn_taking import TurnTaking
+from turn_taking import Playback, TurnTaking
 
 logging.basicConfig(
     level=logging.INFO,
@@ -259,21 +259,40 @@ async def media_stream(ws: WebSocket):
     connected = asyncio.Event()
     connected.set()
 
+    background: set[asyncio.Task] = set()  # keeps clear tasks referenced until they finish
+
     def start_reply(text: str | None) -> asyncio.Task:
         """Start a reply to text, or the greeting when text is None."""
         if text is None:
             reply = _stream_agent_response(
-                ws, agent, stream_sid, call_sid, connected, turns.speaking,
-                transcript_log, transfer_number, greeting=True, on_done=turns.greeting_done,
+                ws, agent, stream_sid, call_sid, connected, turns.playback,
+                transcript_log, transfer_number, greeting=True, on_done=turns.greeting_sent,
             )
         else:
             reply = _stream_agent_response(
-                ws, agent, stream_sid, call_sid, connected, turns.speaking,
+                ws, agent, stream_sid, call_sid, connected, turns.playback,
                 transcript_log, transfer_number, user_text=text, turn_t0=stt_engine.speech_ended_at,
             )
         return asyncio.create_task(reply)
 
-    turns = TurnTaking(start_reply)
+    def stop_agent(reply: asyncio.Task | None) -> None:
+        """Barge-in: once the cancelled reply has stopped sending, drop the audio queued at Twilio."""
+        async def clear() -> None:
+            if reply is not None:
+                await asyncio.gather(reply, return_exceptions=True)
+            if not connected.is_set():
+                return
+            try:
+                await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))
+                logger.info("Sent clear: dropped the agent's queued audio")
+            except Exception:
+                logger.exception("Failed to send clear")
+
+        task = asyncio.create_task(clear())
+        background.add(task)
+        task.add_done_callback(background.discard)
+
+    turns = TurnTaking(start_reply, stop_agent, barge_in_ms=config.BARGE_IN_MS)
 
     try:
         greeting_sent = False
@@ -300,12 +319,15 @@ async def media_stream(ws: WebSocket):
                 pcm = twilio_payload_to_pcm16k(msg["media"]["payload"])
                 await stt_engine.feed_audio(pcm)
 
-                turns.on_audio(stt_engine.speech_active)
+                turns.on_audio(stt_engine.speech_active, stt_engine.speech_ms)
                 transcript = await stt_engine.get_transcript()
                 if transcript:
                     turns.on_transcript(transcript)
                 if stt_engine.pop_end_of_turn():
                     turns.on_end_of_turn()
+
+            elif event == "mark":
+                turns.on_mark(msg.get("mark", {}).get("name", ""))
 
             elif event == "stop":
                 turns.on_stop()
@@ -330,7 +352,7 @@ async def _stream_agent_response(
     stream_sid: str,
     call_sid: str | None,
     connected: asyncio.Event,
-    speaking: asyncio.Event,
+    playback: Playback,
     transcript_log: TranscriptLog | None = None,
     transfer_number: str | None = None,
     user_text: str | None = None,
@@ -340,7 +362,9 @@ async def _stream_agent_response(
 ) -> None:
     """Stream Claude's response sentence-by-sentence through TTS to Twilio.
 
-    turn_t0 is the time.monotonic() at which the caller stopped speaking, for latency logging.
+    After each sentence's audio it sends a Twilio mark from `playback`, which Twilio sends back
+    once the caller has heard that audio. on_done is set when the reply ends. turn_t0 is the
+    time.monotonic() at which the caller stopped speaking, for latency logging.
     """
     should_transfer = False
     started_at = time.monotonic()
@@ -356,7 +380,6 @@ async def _stream_agent_response(
                 transcript_log.user(user_text)
 
         full_response = ""
-        speaking.set()
 
         async for sentence in sentence_stream:
             if not connected.is_set():
@@ -378,6 +401,7 @@ async def _stream_agent_response(
 
             # Stream TTS audio to Twilio as chunks arrive — don't wait for full sentence audio
             if sentence:
+                chunks_before = total_chunks
                 async for chunk in tts.synthesize_stream(sentence):
                     if not connected.is_set():
                         logger.info("Connection closed, aborting response")
@@ -396,6 +420,10 @@ async def _stream_agent_response(
                             f"first sentence +{(first_sentence_at - turn_t0) * 1000:.0f}ms, "
                             f"first audio +{(now - turn_t0) * 1000:.0f}ms after end of speech"
                         )
+                if total_chunks > chunks_before:
+                    # Twilio sends this back once the caller has heard the sentence (TurnTaking.on_mark)
+                    mark = {"event": "mark", "streamSid": stream_sid, "mark": {"name": playback.mark()}}
+                    await ws.send_text(json.dumps(mark))
 
             if should_transfer:
                 break
@@ -415,7 +443,7 @@ async def _stream_agent_response(
             await _send_sms(transfer_number, summary_match.group(1))
 
     except asyncio.CancelledError:
-        # Audio already sent keeps playing from Twilio's buffer, so "after" means the caller heard it.
+        # Barge-in: TurnTaking's stop_agent then clears whatever is still queued at Twilio.
         logger.info(
             f"Response cancelled (barge-in) after {total_chunks} audio chunks"
             if total_chunks else "Response cancelled (barge-in) before any audio"
@@ -423,7 +451,6 @@ async def _stream_agent_response(
     except Exception:
         logger.exception("Error in agent response pipeline")
     finally:
-        speaking.clear()
         if on_done:
             on_done.set()
 
