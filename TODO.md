@@ -10,13 +10,16 @@ Ship marks, `clear` and the 250ms gate as one change: `clear` does little withou
 
 - [ ] **Track playback with Twilio `mark` messages**: Keep `speaking` set until the last mark comes back. Today it clears when sending ends, so barge-in stops working while most of the reply is still playing. Phonon sends 5 s of audio in under 1 s.
 - [ ] **Send Twilio `clear` on barge-in**: Discard the queued audio. Today the caller hears every sentence already sent, even after talking over it.
-- [ ] **Require ~250ms of continuous speech before barge-in**: Today a single 32ms VAD frame triggers it. Once `clear` is sent, a cough or "mm-hmm" would cut the agent off.
-- [ ] **Overlapping replies during the greeting**: Barge-in is off during the greeting, so a caller's "Hello?" starts a second reply that sends audio alongside the greeting. Both share one `speaking` flag, so once the greeting finishes, barge-in is also off for the rest of the second reply. Pinned by the `test_quirk_*` tests in `test_turn_taking.py`.
+- [ ] **Require ~250ms of continuous speech before barge-in**: Today a single 32ms VAD frame triggers it. Once `clear` is sent, a cough or "mm-hmm" would cut the agent off. Settle these while building it:
+  - **Count speech frames, not `speech_active`**: `speech_active` stays true for up to `VAD_EARLY_MS` (400ms) of silence after any speech, until Whisper runs, so a 32ms cough would pass a "250ms of `speech_active`" check. `WhisperSTT` needs to report how much actual speech it has heard in the current utterance.
+  - **250ms probably won't filter out "mm-hmm"**: It usually runs longer than that. The false-trigger test will show it. If so, check the transcript and ignore short acknowledgements. Related: today a lone "Mm-hmm." counts as unfinished (under 3 words), so the agent replies to it after the 1s hold.
+  - **The gate moves the pause boundary earlier**: A cut-off reply gets up to 250ms more to produce audio before it's cancelled. If the pause sweep gets worse, apply the gate only to replies the caller can already hear, and keep cancelling silent ones at the first speech frame.
+- [ ] **Overlapping replies during the greeting**: Barge-in is off during the greeting, so a caller's "Hello?" starts a second reply that sends audio alongside the greeting. Both share one `speaking` flag, so once the greeting finishes, barge-in is also off for the rest of the second reply. Pinned by the `test_quirk_*` tests in `test_turn_taking.py`. Possible fix: hold the caller's text until the greeting has finished playing, which needs the marks.
 - [ ] **Record what the caller actually heard in Claude's history**: Today an interrupted reply leaves nothing in the history, although the caller may have heard a whole sentence.
 - [ ] **Measure**:
   - Add a harness metric for agent audio played after the caller starts talking. Today that's about a sentence; the target is a few hundred ms.
   - Add a false-trigger test: a cough and a "mm-hmm" while the agent is speaking.
-  - Re-run the pause sweep to confirm the cut-in boundaries don't move.
+  - Re-run the pause sweep to confirm the cut-in boundaries don't move (see the gate's note above).
 
 ### Claude's first sentence (step 2)
 
