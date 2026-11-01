@@ -30,7 +30,9 @@ class CallAgent:
 
     async def respond_stream(self, user_text: str) -> AsyncGenerator[str, None]:
         """Stream Claude's response, yielding complete sentences as they form."""
-        self.messages.append({"role": "user", "content": user_text})
+        # A retried reply (cut off before it said anything) finds its question still unanswered
+        if self.messages[-1:] != [{"role": "user", "content": user_text}]:
+            self.messages.append({"role": "user", "content": user_text})
         logger.info(f"User: {user_text}")
 
         buffer = ""

@@ -127,7 +127,8 @@ class Phase(Enum):
 class SpokenReply:
     """One reply's sentences, and how many of them the caller has heard in full."""
 
-    def __init__(self):
+    def __init__(self, text: str | None = None):
+        self.text = text  # What the caller said that this answers (None for the greeting)
         self.sentences: list[str] = []  # As spoken (tags stripped), in order
         self.heard = 0  # The first `heard` sentences have finished playing
         self.written = False  # The reply ran to the end: no more sentences are coming
@@ -217,7 +218,8 @@ class TurnTaking:
         self._hold: asyncio.Task | None = None  # The hold timer, while HOLDING
         self._in_speech = False  # Between an utterance's first speech frame and its transcript
         self._ignore_utterance = False  # It began while the agent talked, and hasn't barged in
-        self._cut_by_utterance: SpokenReply | None = None  # The reply this utterance cut off
+        # A reply barge-in cut off, until the caller's words (or lack of them) say what to do
+        self._cut_unresolved: SpokenReply | None = None
 
     @property
     def phase(self) -> Phase:
@@ -262,7 +264,6 @@ class TurnTaking:
         if not self._in_speech:  # The utterance's first speech frame
             self._in_speech = True
             self._ignore_utterance = self.greeting_done and self.agent_talking
-            self._cut_by_utterance = None
         if self.greeting_done and self.agent_talking and speech_ms >= self._barge_in_ms:
             self._barge_in(speech_ms)
         # HOLDING -> WAITING: don't flush held text in the middle of the caller's next utterance.
@@ -276,7 +277,7 @@ class TurnTaking:
         self._ignore_utterance = False
         if self.last_spoken is not None:
             self.last_spoken.cut_off = True
-        self._cut_by_utterance = self.last_spoken
+        self._cut_unresolved = self.last_spoken
         logger.info(f"Barge-in detected (VAD, {speech_ms}ms of speech)")
         self._stop_agent(reply)
 
@@ -288,7 +289,7 @@ class TurnTaking:
             self._ignore_utterance = False
             logger.info(f"Ignoring {text[-80:]!r}: said while the agent talked, too short to stop it")
             return
-        cut, self._cut_by_utterance = self._cut_by_utterance, None
+        cut, self._cut_unresolved = self._cut_unresolved, None
         if cut is not None and cut.unheard and self._resume_reply and _is_acknowledgement(text):
             # The caller was only showing they're listening: carry on from the sentence they
             # were hearing instead of answering it.
@@ -307,6 +308,21 @@ class TurnTaking:
 
     def on_end_of_turn(self) -> None:
         """VAD_SILENCE_MS of silence after the last transcript."""
+        cut, self._cut_unresolved = self._cut_unresolved, None
+        if cut is not None and self._resume_reply:
+            # What cut the agent off had no words (a breath, a laugh, noise), so carry on as
+            # after an acknowledgement. Without this the agent just goes quiet.
+            if cut.unheard:
+                logger.info(
+                    f"Resuming: what cut the agent off had no words; from sentence {cut.heard + 1} "
+                    f"of {len(cut.sentences)}"
+                )
+                self._reply = self._resume_reply(cut)
+                return
+            if not cut.sentences and cut.text:  # Cut off before it said anything: start it again
+                logger.info(f"Retrying the reply to {cut.text[-80:]!r}: what cut it off had no words")
+                self._reply_to(cut.text)
+                return
         if not self.pending:
             return
         if _is_complete_turn(self.pending):
@@ -324,9 +340,10 @@ class TurnTaking:
 
     def _reply_to(self, text: str) -> None:
         self._cancel_hold()
+        self._cut_unresolved = None
         last = self.last_spoken
         cut_short = last if last is not None and last.cut_short else None
-        self.last_spoken = SpokenReply()
+        self.last_spoken = SpokenReply(text)
         self._reply = self._start_reply(text, self.last_spoken, cut_short)
 
     def _take_pending(self) -> str:

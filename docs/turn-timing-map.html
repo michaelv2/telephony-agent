@@ -331,7 +331,7 @@ footer { font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule)
       <li><b>What sets it off:</b> 250ms of speech (<code>BARGE_IN_MS</code>) while the agent is talking: writing a reply, sending it, or still playing it.</li>
       <li><b>What it does:</b> cancels the reply, then sends Twilio <code>clear</code>, which drops the audio queued for the phone. The caller hears about 300ms of the agent after starting to talk; before 1 Nov it was 6–17s.</li>
       <li><b>Shorter sounds don't stop it:</b> a cough or click under 250ms is ignored, and its transcript gets no reply.</li>
-      <li><b>Acknowledgements resume the reply:</b> an “mm-hmm” or “okay” is longer than 250ms, so it stops the agent. About 1s later, once its transcript shows it was only an acknowledgement, the reply picks up from the start of the sentence the caller was hearing.</li>
+      <li><b>Acknowledgements resume the reply:</b> an “mm-hmm” or “okay” is longer than 250ms, so it stops the agent. About 1s later, once its transcript shows it was only an acknowledgement, the reply picks up from the start of the sentence the caller was hearing. A sound with no words in it (a breath, a laugh) does the same, about 0.8s after it ends.</li>
       <li><b>Claude's history keeps what the caller heard:</b> after a real interruption, only the sentences that finished playing stay in the history.</li>
       <li><b>During the greeting</b> barge-in is off until the greeting has finished playing.</li>
     </ul>

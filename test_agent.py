@@ -205,3 +205,19 @@ def test_revise_last_reply_adds_a_reply_cut_off_while_being_written():
     agent2 = _agent_with(("user", "Recipe?"))
     agent2.revise_last_reply("")
     assert agent2.messages == [{"role": "user", "content": "Recipe?"}]
+
+
+@pytest.mark.asyncio
+async def test_retried_reply_does_not_repeat_the_unanswered_question():
+    """A reply cut off before it said anything is retried; its question is already in the history."""
+    with patch("agent.client") as mock_client:
+        mock_client.messages.stream.return_value = MockStreamContext(["Yes", "."])
+        from agent import CallAgent
+        agent = CallAgent()
+        agent.messages = [{"role": "user", "content": "Tuesday?"}]
+        sentences = [s async for s in agent.respond_stream("Tuesday?")]
+    assert sentences == ["Yes."]
+    assert agent.messages == [
+        {"role": "user", "content": "Tuesday?"},
+        {"role": "assistant", "content": "Yes."},
+    ]

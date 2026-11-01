@@ -463,6 +463,41 @@ def test_acknowledgement_before_any_audio_is_answered(monkeypatch):
     ]
 
 
+def test_sound_with_no_words_resumes(monkeypatch):
+    # Loud enough to stop the agent, but Whisper finds no words (a breath, a laugh, noise).
+    log = run_call(monkeypatch, GREETED + [
+        SPEECH, text("Can you give me the recipe?"), Wait(REPLY_S + 0.05), played("m1"),
+        *TALK, EOT, Wait(0.03),
+    ])
+    assert log == GREETING_LOG + [
+        ("reply", "Can you give me the recipe?"),
+        ("done", "Can you give me the recipe?"),
+        ("clear",),
+        ("resume", "Can you give me the recipe? s2"),
+    ]
+
+
+def test_sound_with_no_words_before_any_audio_retries(monkeypatch):
+    log = run_call(monkeypatch, GREETED + [
+        SPEECH, text("Do you have Tuesday?"), Wait(0.03), *TALK, EOT, Wait(0.03),
+    ])
+    assert log == GREETING_LOG + [
+        ("reply", "Do you have Tuesday?"),
+        ("cancelled", "Do you have Tuesday?"),
+        ("clear",),
+        ("history", ""),
+        ("reply", "Do you have Tuesday?"),  # answered after all
+    ]
+
+
+def test_more_noise_before_the_end_of_turn_still_resumes(monkeypatch):
+    log = run_call(monkeypatch, GREETED + [
+        SPEECH, text("Can you give me the recipe?"), Wait(REPLY_S + 0.05), played("m1"),
+        *TALK, *BLIP, EOT, Wait(0.03),
+    ])
+    assert log[-1] == ("resume", "Can you give me the recipe? s2")
+
+
 @pytest.mark.parametrize("said", [
     "Mm hmm.", "Mm-hmm.", "Mmm.", "Mhm.", "Okay.", "OK.", "Uh-huh.", "Yeah, yeah.", "Right.",
     "Got it.", "I see.", "Okay, go on.", "Yes.",

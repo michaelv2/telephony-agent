@@ -462,6 +462,32 @@ cut: the rest of the "mm-hmm", Whisper about 0.4s later, then TTS (about 20ms).
 
 ---
 
+### 9. A barge-in with no words resumes the reply (2026-11-01)
+
+**Status:** Applied on branch `turn-latency`. Tests in `test_turn_taking.py` and `test_agent.py`.
+
+**What changed:**
+- `turn_taking.py`: when something cuts the agent off and its utterance produces no transcript
+  (Whisper finds no words), the reply resumes at the end of turn, as after an acknowledgement. If
+  the reply hadn't said anything yet, it's started again instead. The cut-off reply stays
+  unresolved across further noises until the caller's words, or the end of turn, settle it.
+- `agent.py`: a retried reply doesn't add its question to the history twice.
+
+**Why:** On the 2026-11-01 live call (13:28), two barge-ins, at 13:29:11 and 13:29:39, came from
+sounds Whisper found no words in (0.7s and 1.1s of audio). The agent stopped, had nothing to
+resume or answer, and stayed silent for 8-9s, until the caller asked "What else?". Both times
+Claude then started the recipe over.
+
+**What it replaced:** a barge-in without a transcript left the agent silent.
+
+**What to watch for if this causes problems:**
+- **The agent resumes after noise that should have stopped it.** Only sounds with no words do
+  this; any transcript decides as before.
+- The resume starts at the end of turn, about 0.8s after the sound ends.
+- **Rollback:** revert the commit.
+
+---
+
 ## Decision log
 
 | Date       | Decision                            | Rationale                                                     |
