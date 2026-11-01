@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +18,7 @@ import tts
 from agent import CallAgent
 from audio import twilio_payload_to_pcm16k
 from stt import WhisperSTT
+from turn_taking import Playback, TurnTaking
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,73 +49,6 @@ stt_engine: WhisperSTT | None = None
 _call_contexts: dict[str, str] = {}
 # Transfer-to number stored by call SID
 _transfer_numbers: dict[str, str] = {}
-
-# If held text hasn't been released after this many seconds, flush it anyway.
-_HOLD_TIMEOUT_SECONDS = 1.0
-
-# Patterns that indicate a clearly complete turn — skip LLM classification
-_COMPLETE_PATTERNS = (
-    "what do you think",
-    "what's your view",
-    "what's your take",
-    "your thoughts",
-    "does that make sense",
-    "if that makes sense",
-    "what do you say",
-    "do you agree",
-    "would you say",
-    "can you elaborate",
-    "i can elaborate",
-    "go ahead",
-    "over to you",
-    "right?",
-    "yeah?",
-)
-
-
-_INCOMPLETE_TRAIL = (
-    " and", " but", " or", " so", " because", " since", " although",
-    " however", " yet", " while", " when", " if", " that", " which",
-    " who", " where", " then", " also", " to", " for", " with",
-    " about", " like", " just", " the", " a", " an", " my", " your",
-    " their", " its", " of", " in", " on", " at", " is", " are",
-    " was", " were", " i'm", " we're", " they're", " it's",
-)
-
-
-def _is_obviously_complete(text: str) -> bool:
-    """Fast check for clearly complete turns — questions and turn-yielding phrases."""
-    lower = text.lower().rstrip()
-    tail = lower[-60:]
-    if "?" in tail:
-        return True
-    return any(p in lower for p in _COMPLETE_PATTERNS)
-
-
-def _is_complete_turn(text: str) -> bool:
-    """Determine if a transcript is a complete conversational turn.
-
-    Uses local heuristics only — no network calls.
-    See CHANGELOG-latency.md for why the Haiku LLM fallback was removed.
-    """
-    if _is_obviously_complete(text):
-        return True
-
-    stripped = text.strip()
-    if not stripped:
-        return False
-
-    if stripped[-1] in ".!?":
-        words = stripped.split()
-        if len(words) >= 3:
-            return True
-
-    lower = stripped.lower()
-    for trail in _INCOMPLETE_TRAIL:
-        if lower.endswith(trail):
-            return False
-
-    return False
 
 # Transcript archive directory
 _TRANSCRIPTS_DIR = Path(__file__).parent / "transcripts"
@@ -147,7 +82,11 @@ class TranscriptLog:
 @app.on_event("startup")
 async def startup():
     global stt_engine
-    stt_engine = WhisperSTT(model_size=config.WHISPER_MODEL)
+    stt_engine = WhisperSTT(
+        model_size=config.WHISPER_MODEL,
+        silence_threshold_ms=config.VAD_SILENCE_MS,
+        early_threshold_ms=config.VAD_EARLY_MS,
+    )
 
 
 # --- TwiML Webhooks ---
@@ -308,63 +247,52 @@ async def initiate_call(request: Request):
 
 @app.websocket("/ws/media")
 async def media_stream(ws: WebSocket):
-    """Handle Twilio Media Stream WebSocket."""
+    """Handle one call's Twilio Media Stream. Turn-taking decisions are in turn_taking.py."""
     await ws.accept()
     logger.info("WebSocket connected")
 
     agent = None
     stream_sid = None
     call_sid = None
+    transfer_number: str | None = None
+    transcript_log: TranscriptLog | None = None
     connected = asyncio.Event()
     connected.set()
-    speaking = asyncio.Event()  # Set while agent TTS is being sent
-    greeting_done = asyncio.Event()  # Set once greeting finishes playing
-    response_task: asyncio.Task | None = None
-    debounce_task: asyncio.Task | None = None
-    hold_timeout_task: asyncio.Task | None = None
-    pending_text = ""  # Accumulates incomplete utterances
-    transcript_log: TranscriptLog | None = None
 
-    transfer_number: str | None = None
+    background: set[asyncio.Task] = set()  # keeps clear tasks referenced until they finish
 
-    async def _debounced_respond(text: str) -> None:
-        """Check turn completeness and fire the response (no debounce delay)."""
-        nonlocal pending_text, response_task, hold_timeout_task
-
-        is_complete = _is_complete_turn(text)
-
-        if not is_complete:
-            pending_text = text
-            logger.info(f"LLM: holding incomplete turn: {text[-80:]}")
-            # Start a hold timeout — flush after N seconds if nothing new arrives
-            if hold_timeout_task and not hold_timeout_task.done():
-                hold_timeout_task.cancel()
-            hold_timeout_task = asyncio.create_task(_flush_after_timeout())
+    def start_reply(text: str | None) -> asyncio.Task:
+        """Start a reply to text, or the greeting when text is None."""
+        if text is None:
+            reply = _stream_agent_response(
+                ws, agent, stream_sid, call_sid, connected, turns.playback,
+                transcript_log, transfer_number, greeting=True, on_done=turns.greeting_sent,
+            )
         else:
-            pending_text = ""
-            if hold_timeout_task and not hold_timeout_task.done():
-                hold_timeout_task.cancel()
-            response_task = asyncio.create_task(
-                _stream_agent_response(
-                    ws, agent, stream_sid, call_sid, connected, speaking, transcript_log,
-                    transfer_number, user_text=text
-                )
+            reply = _stream_agent_response(
+                ws, agent, stream_sid, call_sid, connected, turns.playback,
+                transcript_log, transfer_number, user_text=text, turn_t0=stt_engine.speech_ended_at,
             )
+        return asyncio.create_task(reply)
 
-    async def _flush_after_timeout() -> None:
-        """Flush held text after a timeout in case the speaker is done."""
-        await asyncio.sleep(_HOLD_TIMEOUT_SECONDS)
-        nonlocal pending_text, response_task
-        if pending_text:
-            text = pending_text
-            pending_text = ""
-            logger.info(f"Hold timeout — flushing: {text[-80:]}")
-            response_task = asyncio.create_task(
-                _stream_agent_response(
-                    ws, agent, stream_sid, call_sid, connected, speaking, transcript_log,
-                    transfer_number, user_text=text
-                )
-            )
+    def stop_agent(reply: asyncio.Task | None) -> None:
+        """Barge-in: once the cancelled reply has stopped sending, drop the audio queued at Twilio."""
+        async def clear() -> None:
+            if reply is not None:
+                await asyncio.gather(reply, return_exceptions=True)
+            if not connected.is_set():
+                return
+            try:
+                await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))
+                logger.info("Sent clear: dropped the agent's queued audio")
+            except Exception:
+                logger.exception("Failed to send clear")
+
+        task = asyncio.create_task(clear())
+        background.add(task)
+        task.add_done_callback(background.discard)
+
+    turns = TurnTaking(start_reply, stop_agent, barge_in_ms=config.BARGE_IN_MS)
 
     try:
         greeting_sent = False
@@ -385,63 +313,24 @@ async def media_stream(ws: WebSocket):
 
                 if not greeting_sent:
                     greeting_sent = True
-                    response_task = asyncio.create_task(
-                        _stream_agent_response(
-                            ws, agent, stream_sid, call_sid, connected, speaking,
-                            transcript_log, transfer_number, greeting=True,
-                            on_done=greeting_done,
-                        )
-                    )
+                    turns.greet()
 
             elif event == "media":
-                payload = msg["media"]["payload"]
-                pcm = twilio_payload_to_pcm16k(payload)
-
+                pcm = twilio_payload_to_pcm16k(msg["media"]["payload"])
                 await stt_engine.feed_audio(pcm)
 
-                # VAD-level barge-in: cancel as soon as speech is detected,
-                # but NOT during the greeting (let it play first)
-                if (
-                    stt_engine.speech_active
-                    and speaking.is_set()
-                    and greeting_done.is_set()
-                    and response_task
-                    and not response_task.done()
-                ):
-                    response_task.cancel()
-                    speaking.clear()
-                    logger.info("Barge-in detected (VAD)")
-
+                turns.on_audio(stt_engine.speech_active, stt_engine.speech_ms)
                 transcript = await stt_engine.get_transcript()
-
                 if transcript:
-                    # Cancel any pending debounce — new speech arrived
-                    if debounce_task and not debounce_task.done():
-                        debounce_task.cancel()
-                    # Cancel hold timeout — new speech resets it
-                    if hold_timeout_task and not hold_timeout_task.done():
-                        hold_timeout_task.cancel()
+                    turns.on_transcript(transcript)
+                if stt_engine.pop_end_of_turn():
+                    turns.on_end_of_turn()
 
-                    # Accumulate with any held text
-                    combined = (pending_text + " " + transcript).strip() if pending_text else transcript
-                    pending_text = ""
-
-                    debounce_task = asyncio.create_task(_debounced_respond(combined))
+            elif event == "mark":
+                turns.on_mark(msg.get("mark", {}).get("name", ""))
 
             elif event == "stop":
-                # Cancel debounce/timeout and flush any pending text
-                if debounce_task and not debounce_task.done():
-                    debounce_task.cancel()
-                if hold_timeout_task and not hold_timeout_task.done():
-                    hold_timeout_task.cancel()
-                if pending_text and agent:
-                    response_task = asyncio.create_task(
-                        _stream_agent_response(
-                            ws, agent, stream_sid, call_sid, connected, speaking,
-                            transcript_log, transfer_number, user_text=pending_text
-                        )
-                    )
-                    pending_text = ""
+                turns.on_stop()
                 logger.info("Stream stopped")
                 break
 
@@ -463,15 +352,24 @@ async def _stream_agent_response(
     stream_sid: str,
     call_sid: str | None,
     connected: asyncio.Event,
-    speaking: asyncio.Event,
+    playback: Playback,
     transcript_log: TranscriptLog | None = None,
     transfer_number: str | None = None,
     user_text: str | None = None,
     greeting: bool = False,
     on_done: asyncio.Event | None = None,
+    turn_t0: float | None = None,
 ) -> None:
-    """Stream Claude's response sentence-by-sentence through TTS to Twilio."""
+    """Stream Claude's response sentence-by-sentence through TTS to Twilio.
+
+    After each sentence's audio it sends a Twilio mark from `playback`, which Twilio sends back
+    once the caller has heard that audio. on_done is set when the reply ends. turn_t0 is the
+    time.monotonic() at which the caller stopped speaking, for latency logging.
+    """
     should_transfer = False
+    started_at = time.monotonic()
+    first_sentence_at: float | None = None
+    total_chunks = 0
 
     try:
         if greeting:
@@ -481,14 +379,13 @@ async def _stream_agent_response(
             if transcript_log:
                 transcript_log.user(user_text)
 
-        total_chunks = 0
         full_response = ""
-        speaking.set()
 
         async for sentence in sentence_stream:
             if not connected.is_set():
                 logger.info("Connection closed, aborting response")
                 return
+            first_sentence_at = first_sentence_at or time.monotonic()
 
             # Check for transfer signal
             if _TRANSFER_TAG in sentence:
@@ -504,6 +401,7 @@ async def _stream_agent_response(
 
             # Stream TTS audio to Twilio as chunks arrive — don't wait for full sentence audio
             if sentence:
+                chunks_before = total_chunks
                 async for chunk in tts.synthesize_stream(sentence):
                     if not connected.is_set():
                         logger.info("Connection closed, aborting response")
@@ -515,6 +413,17 @@ async def _stream_agent_response(
                     }
                     await ws.send_text(json.dumps(media_msg))
                     total_chunks += 1
+                    if total_chunks == 1 and turn_t0 is not None:
+                        now = time.monotonic()
+                        logger.info(
+                            f"Latency: respond +{(started_at - turn_t0) * 1000:.0f}ms, "
+                            f"first sentence +{(first_sentence_at - turn_t0) * 1000:.0f}ms, "
+                            f"first audio +{(now - turn_t0) * 1000:.0f}ms after end of speech"
+                        )
+                if total_chunks > chunks_before:
+                    # Twilio sends this back once the caller has heard the sentence (TurnTaking.on_mark)
+                    mark = {"event": "mark", "streamSid": stream_sid, "mark": {"name": playback.mark()}}
+                    await ws.send_text(json.dumps(mark))
 
             if should_transfer:
                 break
@@ -534,11 +443,14 @@ async def _stream_agent_response(
             await _send_sms(transfer_number, summary_match.group(1))
 
     except asyncio.CancelledError:
-        logger.info("Response cancelled (barge-in)")
+        # Barge-in: TurnTaking's stop_agent then clears whatever is still queued at Twilio.
+        logger.info(
+            f"Response cancelled (barge-in) after {total_chunks} audio chunks"
+            if total_chunks else "Response cancelled (barge-in) before any audio"
+        )
     except Exception:
         logger.exception("Error in agent response pipeline")
     finally:
-        speaking.clear()
         if on_done:
             on_done.set()
 

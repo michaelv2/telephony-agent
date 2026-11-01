@@ -1,4 +1,4 @@
-"""Async Kokoro TTS client with audio format conversion for Twilio."""
+"""Async client for the TTS server (Phonon by default), with audio conversion for Twilio."""
 
 import base64
 import logging

@@ -17,9 +17,18 @@ TWILIO_PHONE = os.environ["TWILIO_PHONE"]
 ALLOWED_NUMBERS = [n.strip() for n in os.environ.get("ALLOWED_NUMBERS", "").split(",") if n.strip()]
 
 TTS_URL = os.environ.get("TTS_URL", "http://localhost:9100")
-TTS_VOICE = os.environ.get("TTS_VOICE", "af_heart")
+TTS_VOICE = os.environ.get("TTS_VOICE", "Freya")  # a Phonon voice; each TTS backend has its own names
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base.en")
+
+# End-of-speech detection (see CHANGELOG-latency.md): transcribe after VAD_EARLY_MS of silence and
+# end the turn after VAD_SILENCE_MS. Questions and turn-yielding phrases respond at the early mark.
+# VAD_EARLY_MS=VAD_SILENCE_MS restores single-threshold behaviour.
+VAD_SILENCE_MS = int(os.environ.get("VAD_SILENCE_MS", "800"))
+VAD_EARLY_MS = int(os.environ.get("VAD_EARLY_MS", "400"))
+# Speech needed while the agent talks before it stops and clears its queued audio. Coughs and
+# clicks are shorter; see CHANGELOG-latency.md, entry 7.
+BARGE_IN_MS = int(os.environ.get("BARGE_IN_MS", "250"))
 
 PORT = int(os.environ.get("PORT", "9002"))
 

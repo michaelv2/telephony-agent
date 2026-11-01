@@ -188,6 +188,226 @@ The binary protocol now communicates that in the header.
 
 ---
 
+### 4. Two-stage end-of-turn detection (2026-10-27)
+
+**Status:** Applied on branch `turn-latency`. Tests in `test_endpointing.py` (4 cases).
+Measured with `bench_turn_latency.py`.
+
+**What changed:**
+- `stt/whisper_stt.py`: Whisper now runs after `VAD_EARLY_MS` (default 400ms) of silence instead
+  of 800ms. The end of turn is signalled separately, through `pop_end_of_turn()`, once silence
+  reaches `VAD_SILENCE_MS` (default 800ms). Speech before that cancels it, and the next
+  transcript is appended to the held text.
+- `server.py`: a transcript that `_is_obviously_complete()` accepts responds immediately, at the
+  early mark. That means a `?` near the end, or a turn-yielding phrase. Everything else waits
+  for the end of turn, then goes through `_is_complete_turn()` and the hold logic as before.
+- `server.py`: the hold-timeout flush is cancelled when the caller starts speaking again, so
+  held text is no longer flushed in the middle of their next utterance.
+- `config.py`: new `VAD_EARLY_MS` and `VAD_SILENCE_MS` variables.
+- Logging per turn:
+  - `Transcript (+N ms after speech end, whisper M ms)`
+  - `Latency: respond +A, first sentence +B, first audio +C` (all measured from the end of speech)
+
+**Why:** Whisper only started after the full 800ms of silence, so its ~200ms (base.en) was on
+the critical path of every turn. Questions are the clearest end-of-turn signal, and they don't
+need the full wait.
+
+**What it replaced:** a single 800ms threshold, where transcription and the end of turn were the
+same event. Simply lowering that threshold was rejected: entry 1 records that 800ms already
+caught people mid-thought.
+
+**Measured** (2026-10-27): the same code with `VAD_EARLY_MS=800` and `=400`. Each ran 12
+synthetic turns, with Phonon TTS.
+
+| Stage | 800 (old) | 400/800 (new) |
+|---|---|---|
+| End of turn, statements | 1022ms | 800ms |
+| End of turn, questions | 1042ms | 622ms |
+| Claude first sentence | 1871ms | 1988ms (noise: 1.1-4.2s per turn) |
+| TTS first audio | 22ms | 20ms |
+| End to end, harness | 3084ms | 2879ms |
+
+**Pause tolerance** (`bench_turn_latency.py 2 --pauses ...`): the caller says a line, pauses for
+the given time (voiced to voiced), then keeps going. The cell counts runs where agent audio
+arrived before the caller finished, out of 2:
+
+| Pause | Question, old | Question, new | Statement, old | Statement, new |
+|---|---|---|---|---|
+| 0.5-1.5s | 0/2 | 0/2 | 0/2 | 0/2 |
+| 2s | 0/2 | 0/2 | 1/2 | 1/2 |
+| 2.5s | 0/2 | **2/2** | 1/2 | 0/2 |
+| 3s | 2/2 | 2/2 | 2/2 | 2/2 |
+
+Replies started and then dropped before any audio: 14 (old) and 15 (new).
+- **Where the boundary sits.** A pause is safe while it is shorter than end-of-turn time plus
+  Claude's time to its first sentence plus TTS. Step 1 moved the boundary for questions about
+  0.5s earlier, from 3s to 2.5s. Statements didn't change measurably.
+- **Anything that makes Claude faster moves the boundary earlier by the same amount.** The two
+  effects interact.
+- **Barge-in doesn't flush Twilio's buffer.** No `clear` message is sent, so once audio is out
+  the caller hears that whole sentence, even if they talk over it.
+
+**What to watch for if this causes problems:**
+- **The agent jumps in after a question when the caller keeps going.** For example "Do you have
+  Tuesday? ... or maybe Wednesday." The reply starts about 620ms after the question. Barge-in
+  cancels it, but the caller hears its first syllables. The fix is to raise `VAD_EARLY_MS` (to
+  500-600). Don't collapse back to a single threshold.
+- **Damage where a mid-sentence pause splits the transcript.** A pause of 400-800ms gets the two
+  halves transcribed separately and joined. Watch for words dropped or garbled at the join.
+- **Rollback:** `VAD_EARLY_MS=800` restores the old timing exactly. The hold-timeout cancel stays.
+
+**Expected savings:** about 220ms per statement and 420ms per question. Both measured.
+
+---
+
+### 5. Turn-taking moved into `turn_taking.py` (2026-10-31)
+
+**Status:** Applied on branch `turn-latency`. No timing change intended. Tests in
+`test_turn_taking.py` (14 cases). The 13 scenario tests were written and passed against the old
+code first, then passed unchanged after the move.
+
+**What changed:**
+- New `turn_taking.py`. `TurnTaking` holds one call's turn state: the pending text, the hold
+  timer, the current reply, `speaking` and `greeting_done`. It has one method per STT signal,
+  `on_audio`, `on_transcript` and `on_end_of_turn`, plus `greet` and `on_stop`. `phase` names the
+  caller-side state: `LISTENING`, `WAITING` (for end of turn) or `HOLDING`.
+- `_is_obviously_complete`, `_is_complete_turn`, `_COMPLETE_PATTERNS`, `_INCOMPLETE_TRAIL` and
+  `_HOLD_TIMEOUT_SECONDS` moved there from `server.py`. Same names, same code, so searches from
+  entries 1 and 4 still find them.
+- `media_stream` in `server.py` now only feeds STT signals to `TurnTaking` and starts the replies
+  it asks for. `_stream_agent_response` is unchanged.
+- `debounce_task` is gone. Since entry 1, `_debounced_respond` had no delay left; it only ran one
+  event-loop tick after being scheduled. The decision now runs directly. That one tick is the only
+  timing difference.
+- Barge-in and hold log lines now come from the `turn` logger (`[turn]`, not `[server]`).
+
+**Why:** The state was spread across three asyncio Events, three tasks and `pending_text` in
+nested closures in `media_stream`, which made the timing hard to follow. The barge-in work
+(marks, `clear`, 250ms gate) adds more state. The Turn Timing Map (`docs/turn-timing-map.html`) uses the
+same phase names.
+
+**What it replaced:** the `_debounced_respond` and `_flush_after_timeout` closures in
+`media_stream`.
+
+**Measured** (2026-10-31): `bench_turn_latency.py 3` and `2 --pauses 0.5,1,1.5,2,2.5,3`, Phonon
+TTS, before and after the move. Reply start comes from the server's `Latency: respond` line.
+
+| Stage | Before | After |
+|---|---|---|
+| Reply start, early mark (questions) | 549ms median, n=9 | 550ms median, n=10 |
+| Reply start, end of turn | 800ms median, n=34 | 800ms median, n=35 |
+| Claude first sentence | 2376ms median | 2323ms median |
+| End to end, harness, all turns | 2577ms | 2740ms (Claude noise) |
+| Barge-ins / dropped before any audio | 19 / 14 | 17 / 13 |
+| Pause sweep: first pause cut into | question 2.5s, statement 2.5s | question 2.5s, statement 2s (1 of 2) |
+
+The pause sweep has 2 runs per cell; the 2s statement cell was also 1 of 2 on 2026-10-27. The
+synthetic utterances never hit the hold path, so holds are only checked by the scenario tests.
+
+**What to watch for if this causes problems:**
+- If replies start or get cut off at different times than before, the move wasn't faithful.
+  Reproduce it as a scenario in `test_turn_taking.py` first; that file pins the old behaviour.
+- The two `test_quirk_*` tests pin current behaviour that is wrong: replies that overlap the
+  greeting (TODO.md, barge-in). The barge-in work should change them on purpose.
+- **Rollback:** revert the commit. No config is involved.
+
+---
+
+### 6. Phonon is the default TTS (2026-11-01)
+
+**Status:** Applied on branch `turn-latency`.
+
+**What changed:**
+- `./start.sh` with no argument starts Phonon instead of Kokoro. When `TTS_VOICE` isn't set in
+  the environment or `.env`, `start.sh` picks a voice for the model: `Freya` for Phonon,
+  `af_heart` for Kokoro.
+- `config.py`'s default `TTS_VOICE` is now `Freya`.
+- `start.sh`'s setup checks now confirm the voice exists on the TTS server (`GET /voices`).
+
+**Why:** Every measurement since entry 4 used Phonon (CPU, q8_0), so the recorded latencies
+describe Phonon. Its first audio arrives about 20ms after the TTS request.
+
+**What it replaced:** Kokoro on the GPU, voice `af_heart`. `./start.sh kokoro` still runs it.
+
+**What to watch for if this causes problems:**
+- **A voice from another backend breaks every reply.** With `TTS_VOICE=af_heart` on Phonon, the
+  TTS server raises `LookupError: no voice 'af_heart' is registered`. Calls still connect but
+  the agent is silent, and the old setup checks all passed. An existing `.env` with
+  `TTS_VOICE=af_heart` (which `deploy.sh` used to write) has to be changed. `deploy.sh` now
+  provisions Phonon and leaves `TTS_VOICE` unset.
+- Phonon runs on the CPU, so heavy CPU load elsewhere on the host shows up as TTS latency.
+- **Rollback:** `./start.sh kokoro`, or revert the commit.
+
+---
+
+### 7. Barge-in during playback: marks, `clear` and a 250ms speech gate (2026-11-01)
+
+**Status:** Applied on branch `turn-latency`. Tests in `test_turn_taking.py` (17 cases) and
+`test_endpointing.py` (6 cases). Measured with `bench_turn_latency.py --barge-in` and the pause
+sweep.
+
+**What changed:**
+- `server.py`: after each sentence's audio, `_stream_agent_response` sends a Twilio `mark`, and
+  `media_stream` passes the marks Twilio sends back to `TurnTaking.on_mark`. On barge-in, once the
+  cancelled reply has stopped sending, it sends Twilio `clear`.
+- `turn_taking.py`: `Playback` tracks the marks Twilio hasn't sent back yet. The agent counts as
+  talking while a reply is being written or sent, or its audio is still playing. Barge-in needs
+  `BARGE_IN_MS` (250) of speech while it talks, then cancels the reply and clears the audio.
+  Speech that started while the agent talked and didn't reach 250ms gets no reply. The greeting
+  can't be cut off until it has finished playing; before, that lasted only until it was sent.
+- `stt/`: `speech_ms` counts the speech frames in the current utterance. `speech_active` stays on
+  through up to 400ms of silence, so it can't tell a cough from a sentence.
+- `config.py`: `BARGE_IN_MS`.
+- The shared `speaking` flag is gone. That also fixes a reply overlapping the greeting losing
+  barge-in when the greeting finished (the old `test_quirk_greeting_finishing_disarms_*`).
+
+**Why:** Barge-in was tied to sending, and several seconds of audio send in about a second. On
+the 2026-11-01 live call it fired once; after that each reply queued behind the audio still
+playing, and the agent fell up to ~37s behind the caller. Even when it fired, nothing stopped the
+audio already queued at Twilio.
+
+**What it replaced:** one 32ms speech frame cancelled a reply while it was being written or
+sent. Audio already sent always played to the end.
+
+**Measured** (2026-11-01, Phonon, 3 runs per case; "heard after" is agent audio the caller hears
+after starting to talk):
+
+| Case | Heard after: before → after | Barge-in fired | `clear` | Agent replied to it |
+|---|---|---|---|---|
+| Interrupt 1s into the reply | 5.8s → 0.30s | 3/3 → 3/3 | 0/3 → 3/3 | 3/3 → 3/3 (expected) |
+| Interrupt 3s into the reply | 16.6s → 0.28s | 0/3 → 3/3 | 0/3 → 3/3 | 3/3 → 3/3 (expected) |
+| 160ms blip of speech, 1.5s in | carries on → carries on | 3/3 → 0/3 | 0/3 → 0/3 | 1/3 → 0/3 |
+| "Mm-hmm", 1.5s in | 11.8s → 0.27s | 3/3 → 3/3 | 0/3 → 3/3 | 3/3 → 3/3 |
+
+Before, a false trigger silently dropped the sentences not yet sent. Now a blip doesn't stop the
+agent at all.
+
+Pause sweep (2 runs per cell; cells are runs where agent audio cut into the pause):
+
+| Pause | Question, before (3 sweeps) | Question, after | Statement, before (3 sweeps) | Statement, after |
+|---|---|---|---|---|
+| 0.5-1.5s | 0 of 6 each | 0/2 each | 0 of 6 each | 0/2 each |
+| 2s | 0 of 6 | 0/2 | 2 of 6 | 1/2 |
+| 2.5s | 6 of 6 | 1/2 | 4 of 6 | 2/2 |
+| 3s | 6 of 6 | 2/2 | 6 of 6 | 2/2 |
+
+The boundary didn't move measurably. A cut-in now costs the caller about 300ms of agent audio
+before the `clear`, where it used to cost a whole sentence or more.
+
+**What to watch for if this causes problems:**
+- **"Mm-hmm" still stops the agent.** It is longer than 250ms, so the agent stops, then replies
+  to "Mm." after the 1s hold (3 of 3). The next step is in TODO.md.
+- **The agent stops on noise, or ignores the caller.** Tune `BARGE_IN_MS` (env var): raise it if
+  noise stops the agent, lower it if short interruptions are missed. 32 restores a one-frame
+  trigger, still with marks and `clear`.
+- **The agent ignores everything said while it talks.** That would mean marks aren't coming
+  back, so it never stops counting as talking. Each reply should log `Playback finished` once the
+  caller has heard it.
+  Twilio documents the echo, and the bench models it, but a live call is the real check.
+- **Rollback:** revert the commit.
+
+---
+
 ## Decision log
 
 | Date       | Decision                            | Rationale                                                     |
@@ -196,3 +416,8 @@ The binary protocol now communicates that in the header.
 | 2026-08-23 | Prioritized debounce removal first  | Biggest savings (500-800ms), lowest complexity, pure deletion  |
 | 2026-08-23 | Chose local heuristics over Haiku   | Network round-trip too expensive for latency-critical path     |
 | 2026-08-23 | Async client before TTS streaming   | Unblocks event loop, prerequisite for proper TTS pipelining    |
+| 2026-10-27 | Two-stage endpointing, not a shorter threshold | Hides Whisper in the silence; statements still wait 800ms |
+| 2026-10-27 | Per-stage latency logs + bench harness  | Claude's 1.1-4.2s variance hides 200-400ms wins end to end    |
+| 2026-10-31 | Turn-taking state in one class, no timing change | Hard to follow across closures; barge-in work adds state |
+| 2026-11-01 | Phonon as the default TTS | All latency measurements since 2026-10-27 used it |
+| 2026-11-01 | Barge-in tracks playback, 250ms gate, `clear` | Replies stacked up to 37s behind on a live call |

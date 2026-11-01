@@ -27,7 +27,7 @@ os.environ.setdefault("TWILIO_API_KEY", "test")
 os.environ.setdefault("TWILIO_API_SECRET", "test")
 os.environ.setdefault("TWILIO_PHONE", "+10000000000")
 
-from server import _is_obviously_complete, _is_complete_turn
+from turn_taking import _is_obviously_complete, _is_complete_turn
 
 _is_complete_turn_heuristic = _is_complete_turn
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Provisions the telephony agent + Kokoro TTS server on a fresh GPU host.
+# Provisions the telephony agent + Phonon TTS server on a fresh GPU host.
 #
 # Usage:
 #   ./deploy.sh [DEST_DIR]              # default: ~/telephony
 #   GPU=1 ./deploy.sh                   # pin a specific GPU (default: freest card)
-#   TTS_MODEL=chatterbox ./deploy.sh    # different TTS backend (default: kokoro)
+#   TTS_MODEL=kokoro ./deploy.sh        # different TTS model (default: phonon)
 #
 # It installs everything and verifies it, but does NOT start the server —
 # the final block prints the exact start command, so the GPU is your call.
@@ -14,7 +14,13 @@ set -euo pipefail
 DEST_DIR="${1:-$HOME/telephony}"
 AGENT_REPO="git@github.com:michaelv2/telephony-agent.git"
 TTS_REPO="git@github.com:michaelv2/tts-server.git"
-TTS_MODEL="${TTS_MODEL:-kokoro}"
+TTS_MODEL="${TTS_MODEL:-phonon}"
+# The backend (and its .venv-<backend>) for the model, as tts-server/run.sh maps it
+case "$TTS_MODEL" in
+    qwen3-*) TTS_BACKEND=qwen3 ;;
+    phonon|phonon-40m) TTS_BACKEND=phonon ;;
+    *) TTS_BACKEND="$TTS_MODEL" ;;
+esac
 
 log()  { printf '\033[1;34m[deploy]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[deploy]\033[0m %s\n' "$*"; }
@@ -36,8 +42,10 @@ ver_ok python3 2>/dev/null || warn "python3 is not 3.11+ — tts-server/setup-ba
 
 command -v nvidia-smi >/dev/null 2>&1 \
     && log "nvidia-smi OK: $(nvidia-smi --query-gpu=name --format=csv,noheader | paste -sd', ' -)" \
-    || warn "nvidia-smi not found — Whisper + Kokoro need a CUDA GPU (or change WHISPER_MODEL/device to CPU, expect slow STT)"
-command -v espeak-ng >/dev/null 2>&1 || warn "espeak-ng missing — Kokoro needs it: sudo apt-get install espeak-ng"
+    || warn "nvidia-smi not found — Whisper needs a CUDA GPU (or change WHISPER_MODEL/device to CPU, expect slow STT)"
+if [[ "$TTS_BACKEND" == "kokoro" ]]; then
+    command -v espeak-ng >/dev/null 2>&1 || warn "espeak-ng missing — Kokoro needs it: sudo apt-get install espeak-ng"
+fi
 command -v ngrok >/dev/null 2>&1 || warn "ngrok missing — needed for the Twilio tunnel unless PUBLIC_URL is set (sudo apt install via snap or brew/ngrok release)"
 
 # --- GPU selection ---
@@ -85,8 +93,8 @@ log "Building agent venv ($AGENT_PYTHON) + pip install -r requirements.txt"
 "$AGENT_DIR/.venv/bin/pip" install -q -r "$AGENT_DIR/requirements.txt"
 
 # --- TTS venv ---
-log "Building TTS venv for: $TTS_MODEL"
-( cd "$TTS_DIR" && ./setup-backend.sh "$TTS_MODEL" )
+log "Building TTS venv for: $TTS_MODEL (backend $TTS_BACKEND)"
+( cd "$TTS_DIR" && ./setup-backend.sh "$TTS_BACKEND" )
 
 # --- .env scaffolding ---
 ENV_FILE="$AGENT_DIR/.env"
@@ -105,7 +113,7 @@ TWILIO_PHONE=
 
 # TTS (started by start.sh)
 TTS_URL=http://localhost:9100
-TTS_VOICE=af_heart
+# TTS_VOICE=  # leave unset: start.sh picks one for the model (Freya for Phonon, af_heart for Kokoro)
 
 # STT / server
 WHISPER_MODEL=base.en
@@ -116,14 +124,12 @@ fi
 
 # --- Smoke checks (no server started) ---
 log "Verifying installs"
-"$TTS_DIR/.venv-$TTS_MODEL/bin/python" -c "import torch; print('  tts venv torch', torch.__version__, '| cuda available:', torch.cuda.is_available())" || warn "torch import check failed"
-if [[ "$TTS_MODEL" == "kokoro" ]]; then
-    "$TTS_DIR/.venv-kokoro/bin/python" -c "import kokoro; print('  tts venv kokoro OK')" || warn "kokoro import check failed"
-else
-    # qwen3/chatterbox/orpheus each live in their own venv
-    venv_for="$TTS_MODEL"; case "$TTS_MODEL" in qwen3-*) venv_for=qwen3 ;; esac
-    "[ -d \"$TTS_DIR/.venv-$venv_for/bin/python\" ]" && log "  tts venv present: .venv-$venv_for" || warn "tts venv .venv-$venv_for missing"
-fi
+TTS_PY="$TTS_DIR/.venv-$TTS_BACKEND/bin/python"
+case "$TTS_BACKEND" in
+    phonon) "$TTS_PY" -c "import ptts; print('  tts venv ptts', ptts.__version__, '(Phonon runs on the CPU)')" || warn "ptts import check failed" ;;
+    kokoro) "$TTS_PY" -c "import kokoro, torch; print('  tts venv kokoro OK | cuda available:', torch.cuda.is_available())" || warn "kokoro import check failed" ;;
+    *) [[ -x "$TTS_PY" ]] && log "  tts venv present: .venv-$TTS_BACKEND" || warn "tts venv .venv-$TTS_BACKEND missing" ;;
+esac
 "$AGENT_DIR/.venv/bin/python" -c "import torch, faster_whisper, fastapi, twilio, anthropic; print(f'  agent venv imports OK | torch {torch.__version__}, cuda available: {torch.cuda.is_available()}')"
 
 # --- Handoff ---
@@ -137,16 +143,16 @@ cat <<EOF
   GPU   : CUDA_VISIBLE_DEVICES=$GPU_CHOICE${GPU_MEM_INFO:+  ($GPU_MEM_INFO)}
 
   1. Check credentials:      $ENV_FILE
-     (twilio:  TTS voice af_heart; webhook set after first start)
+     (TTS voice: start.sh picks one for $TTS_MODEL unless TTS_VOICE is set; webhook set after first start)
   2. Start:
        cd $AGENT_DIR
        CUDA_VISIBLE_DEVICES=$GPU_CHOICE ./start.sh $TTS_MODEL
   3. Twilio webhook →  https://<ngrok-url>/call/inbound  (shown in start.sh output)
 
   Notes:
-  - First run downloads Whisper/Silero/Kokoro weights from Hugging Face (one time).
-  - Ollama: the LLM leg is the Anthropic API, not local — only Whisper (~0.5GB)
-    and Kokoro (~0.5GB) sit on the GPU, plus two CUDA contexts.
+  - First run downloads Whisper, Silero and $TTS_MODEL weights from Hugging Face (one time).
+  - The LLM leg is the Anthropic API, not local. Whisper (~0.5GB) sits on the GPU;
+    Phonon runs on the CPU, while Kokoro would add ~0.5GB and a second CUDA context.
   - start.sh's setup check auto-verifies TTS, ngrok, and Twilio webhooks.
 ============================================
 EOF

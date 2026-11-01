@@ -13,10 +13,19 @@ class BaseSTT(ABC):
         """Return transcript if speech just ended, else None."""
 
     @abstractmethod
+    def pop_end_of_turn(self) -> bool:
+        """True once, when silence after the last transcript reaches the end-of-turn threshold."""
+
+    @abstractmethod
     def reset(self) -> None:
         """Clear buffers for a new utterance."""
 
     @property
     @abstractmethod
     def speech_active(self) -> bool:
-        """True if VAD currently detects speech."""
+        """True from the first speech frame of an utterance until it is transcribed."""
+
+    @property
+    @abstractmethod
+    def speech_ms(self) -> int:
+        """Milliseconds of actual speech heard in the current utterance (silent frames not counted)."""
