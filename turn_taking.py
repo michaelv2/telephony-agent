@@ -193,7 +193,10 @@ class TurnTaking:
 
     def on_mark(self, name: str) -> None:
         """Twilio has played the audio sent before this mark."""
+        was_playing = self.playback.playing
         self.playback.on_mark(name)
+        if was_playing and not self.playback.playing:
+            logger.info("Playback finished: the caller has heard all the audio sent")
 
     def on_audio(self, speech_active: bool, speech_ms: int = 0) -> None:
         """Every media frame, once STT has processed it. speech_ms is how much actual speech the

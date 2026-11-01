@@ -401,7 +401,8 @@ before the `clear`, where it used to cost a whole sentence or more.
   noise stops the agent, lower it if short interruptions are missed. 32 restores a one-frame
   trigger, still with marks and `clear`.
 - **The agent ignores everything said while it talks.** That would mean marks aren't coming
-  back, so it never stops counting as talking. Check the log for `Sent clear` and for mark events.
+  back, so it never stops counting as talking. Each reply should log `Playback finished` once the
+  caller has heard it.
   Twilio documents the echo, and the bench models it, but a live call is the real check.
 - **Rollback:** revert the commit.
 
