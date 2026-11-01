@@ -17,7 +17,7 @@ Caller → Twilio (mulaw 8kHz) → Silero VAD → Whisper STT → Claude (stream
 - [ngrok](https://ngrok.com/) (for local development)
 - A Twilio account with a phone number and API keys
 - An Anthropic API key
-- The [tts-server](https://github.com/michaelv2/tts-server) running (supports Kokoro, Chatterbox, Qwen3, and Orpheus backends)
+- The [tts-server](https://github.com/michaelv2/tts-server) running (supports Phonon, Kokoro, Chatterbox, Qwen3, and Orpheus backends; `start.sh` uses Phonon by default)
 
 ## Setup
 
@@ -42,7 +42,7 @@ TWILIO_PHONE=+1...
 | Variable | Default | Description |
 |---|---|---|
 | `TTS_URL` | `http://localhost:9100` | TTS server endpoint |
-| `TTS_VOICE` | `af_heart` | Voice name for TTS (see table below) |
+| `TTS_VOICE` | `Freya` | Voice name for TTS (see table below). `start.sh` picks one for the model when unset |
 | `WHISPER_MODEL` | `base.en` | Faster-whisper model size |
 | `PORT` | `9002` | Server port |
 | `PUBLIC_URL` | auto-detected from ngrok | Public URL for Twilio webhooks |
@@ -54,6 +54,7 @@ The TTS server supports multiple backends. Set `TTS_VOICE` accordingly:
 
 | Backend | `TTS_VOICE` | Notes |
 |---|---|---|
+| Phonon | `Freya` | 38 voices; `GET /voices` on the TTS server lists them |
 | Kokoro | `af_heart` |
 | Chatterbox | `default` |
 | Qwen3 (clone) | `heart` (folder name in `voices/qwen3/`) | Too slow for real-time |

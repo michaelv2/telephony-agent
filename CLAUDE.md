@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A real-time telephony agent that handles phone calls via Twilio Media Streams. Incoming audio goes through Whisper STT, the transcript is sent to Claude for a response, and the response is streamed sentence-by-sentence through Kokoro TTS back to the caller.
+A real-time telephony agent that handles phone calls via Twilio Media Streams. Incoming audio goes through Whisper STT, the transcript is sent to Claude for a response, and the response is streamed sentence-by-sentence through TTS (Phonon by default) back to the caller.
 
 ## Running
 
 ```bash
 # Full stack (TTS server + ngrok + server) — requires ngrok installed
-./start.sh            # Kokoro TTS
-./start.sh phonon     # or another tts-server model
+./start.sh            # Phonon TTS (voice Freya)
+./start.sh kokoro     # or another tts-server model
 
 # Server only (if you manage tunneling separately or have PUBLIC_URL set)
 .venv/bin/python server.py
@@ -26,11 +26,11 @@ Set Twilio voice webhook to `{PUBLIC_URL}/call/inbound` (POST).
 - `ANTHROPIC_API_KEY`
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, `TWILIO_PHONE`
 
-Optional: `TTS_URL`, `TTS_VOICE` (`af_heart`), `WHISPER_MODEL` (`base.en`), `PORT` (`9002`), `PUBLIC_URL` (auto-detected from ngrok), `AGENT_PROMPT`, `ALLOWED_NUMBERS`, `VAD_EARLY_MS` (`400`), `VAD_SILENCE_MS` (`800`).
+Optional: `TTS_URL`, `TTS_VOICE` (`Freya`; must be a voice of the running TTS model, and `start.sh` picks one per model when unset), `WHISPER_MODEL` (`base.en`), `PORT` (`9002`), `PUBLIC_URL` (auto-detected from ngrok), `AGENT_PROMPT`, `ALLOWED_NUMBERS`, `VAD_EARLY_MS` (`400`), `VAD_SILENCE_MS` (`800`).
 
 ## Architecture
 
-The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whisper -> Claude (streaming) -> Kokoro TTS -> mulaw 8kHz -> Twilio**.
+The real-time pipeline is: **Twilio mulaw 8kHz -> PCM 16kHz -> Silero VAD -> Whisper -> Claude (streaming) -> TTS (Phonon) -> mulaw 8kHz -> Twilio**.
 
 **`server.py`** — FastAPI app. Four HTTP endpoints (`/call/inbound`, `/call/outbound` for TwiML, `/sms/inbound` to start a call by text, `/api/call` to initiate outbound calls) and one WebSocket endpoint (`/ws/media`) that handles the Twilio Media Stream protocol. Each media event is decoded and fed to STT, and the STT signals go to `TurnTaking`, which starts and cancels `_stream_agent_response` tasks (Claude -> TTS -> Twilio).
 

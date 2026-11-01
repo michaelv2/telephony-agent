@@ -3,14 +3,23 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Model argument: ./start.sh [model]   (default: kokoro)
-TTS_MODEL="${1:-kokoro}"
+# Model argument: ./start.sh [model]   (default: phonon)
+TTS_MODEL="${1:-phonon}"
 TTS_SERVER_DIR="${TTS_SERVER_DIR:-$(cd "$(dirname "$0")/.." && pwd)/tts-server}"
 
 # Load .env for PORT
 set -a
 source .env 2>/dev/null || true
 set +a
+
+# Each TTS backend has its own voice names (a Kokoro voice like af_heart fails on Phonon), so
+# pick one for the model unless TTS_VOICE is set in the environment or .env.
+if [[ -z "${TTS_VOICE:-}" ]]; then
+    case "$TTS_MODEL" in
+        phonon|phonon-40m) export TTS_VOICE=Freya ;;
+        kokoro) export TTS_VOICE=af_heart ;;
+    esac
+fi
 PORT="${PORT:-9002}"
 TTS_URL="${TTS_URL:-http://localhost:9100}"
 TTS_PORT="${TTS_PORT:-9100}"
@@ -49,7 +58,7 @@ if [ -z "${NGROK_URL:-}" ]; then
     exit 1
 fi
 
-# Start the TTS server (kokoro by default; override with ./start.sh <model>)
+# Start the TTS server (phonon by default; override with ./start.sh <model>)
 echo "[*] Starting TTS server (model: $TTS_MODEL) on port $TTS_PORT..."
 if [[ ! -x "$TTS_SERVER_DIR/run.sh" ]]; then
     echo "[!] TTS server not found at $TTS_SERVER_DIR (set TTS_SERVER_DIR to override)"
@@ -114,6 +123,16 @@ if curl -sf "$TTS_URL" >/dev/null 2>&1 || curl -sf "$TTS_URL/health" >/dev/null 
     pass "TTS server reachable at $TTS_URL"
 else
     fail "TTS server NOT reachable at $TTS_URL"
+fi
+
+# TTS voice: an unknown voice still lets calls connect, but every reply fails with no audio
+VOICE="${TTS_VOICE:-Freya}"  # config.py's default
+if [[ "$TTS_MODEL" == *-design ]]; then
+    pass "TTS voice is a design instruction for $TTS_MODEL (not checked)"
+elif curl -sf "$TTS_URL/voices" 2>/dev/null | python3 -c 'import sys, json; v = sys.argv[1].lower(); sys.exit(0 if any(k.lower() == v for k in json.load(sys.stdin)) else 1)' "$VOICE"; then
+    pass "TTS voice '$VOICE' available on $TTS_MODEL"
+else
+    fail "TTS voice '$VOICE' NOT available on $TTS_MODEL (set TTS_VOICE to one from $TTS_URL/voices)"
 fi
 
 # ngrok

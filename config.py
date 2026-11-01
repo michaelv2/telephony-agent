@@ -17,7 +17,7 @@ TWILIO_PHONE = os.environ["TWILIO_PHONE"]
 ALLOWED_NUMBERS = [n.strip() for n in os.environ.get("ALLOWED_NUMBERS", "").split(",") if n.strip()]
 
 TTS_URL = os.environ.get("TTS_URL", "http://localhost:9100")
-TTS_VOICE = os.environ.get("TTS_VOICE", "af_heart")
+TTS_VOICE = os.environ.get("TTS_VOICE", "Freya")  # a Phonon voice; each TTS backend has its own names
 
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base.en")
 

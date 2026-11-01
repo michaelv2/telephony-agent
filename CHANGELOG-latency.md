@@ -313,6 +313,32 @@ synthetic utterances never hit the hold path, so holds are only checked by the s
 
 ---
 
+### 6. Phonon is the default TTS (2026-11-01)
+
+**Status:** Applied on branch `turn-latency`.
+
+**What changed:**
+- `./start.sh` with no argument starts Phonon instead of Kokoro. When `TTS_VOICE` isn't set in
+  the environment or `.env`, `start.sh` picks a voice for the model: `Freya` for Phonon,
+  `af_heart` for Kokoro.
+- `config.py`'s default `TTS_VOICE` is now `Freya`.
+- `start.sh`'s setup checks now confirm the voice exists on the TTS server (`GET /voices`).
+
+**Why:** Every measurement since entry 4 used Phonon (CPU, q8_0), so the recorded latencies
+describe Phonon. Its first audio arrives about 20ms after the TTS request.
+
+**What it replaced:** Kokoro on the GPU, voice `af_heart`. `./start.sh kokoro` still runs it.
+
+**What to watch for if this causes problems:**
+- **A voice from another backend breaks every reply.** With `TTS_VOICE=af_heart` on Phonon, the
+  TTS server raises `LookupError: no voice 'af_heart' is registered`. Calls still connect but
+  the agent is silent, and the old setup checks all passed. `deploy.sh` writes
+  `TTS_VOICE=af_heart` into a new `.env`, and still provisions Kokoro.
+- Phonon runs on the CPU, so heavy CPU load elsewhere on the host shows up as TTS latency.
+- **Rollback:** `./start.sh kokoro`, or revert the commit.
+
+---
+
 ## Decision log
 
 | Date       | Decision                            | Rationale                                                     |
@@ -324,3 +350,4 @@ synthetic utterances never hit the hold path, so holds are only checked by the s
 | 2026-10-27 | Two-stage endpointing, not a shorter threshold | Hides Whisper in the silence; statements still wait 800ms |
 | 2026-10-27 | Per-stage latency logs + bench harness  | Claude's 1.1-4.2s variance hides 200-400ms wins end to end    |
 | 2026-10-31 | Turn-taking state in one class, no timing change | Hard to follow across closures; barge-in work adds state |
+| 2026-11-01 | Phonon as the default TTS | All latency measurements since 2026-10-27 used it |
